@@ -1766,6 +1766,17 @@ void ggml_vec_dot_q4_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
 
    for (int i = 0; i < nb; ++i) {
 
+        // Prefetch next block's metadata and start of quantized data
+        if (i + 1 < nb) {
+            _mm_prefetch((const char*)&x[i+1], _MM_HINT_T0);           // q4_K header (16 bytes)
+            _mm_prefetch((const char*)&x[i+1].qs, _MM_HINT_T0);        // q4_K quantized data start
+            _mm_prefetch((const char*)&x[i+1].qs + 64, _MM_HINT_T1);   // q4_K data continued (L2)
+            _mm_prefetch((const char*)&y[i+1], _MM_HINT_T0);           // q8_K header
+            _mm_prefetch((const char*)&y[i+1].qs, _MM_HINT_T0);        // q8_K quantized data start
+            _mm_prefetch((const char*)&y[i+1].qs + 64, _MM_HINT_T1);   // q8_K data continued (L2)
+            _mm_prefetch((const char*)&y[i+1].qs + 128, _MM_HINT_T1);  // q8_K data continued (L2)
+        }
+
         const float d = y[i].d * GGML_CPU_FP16_TO_FP32(x[i].d);
         const float dmin = -y[i].d * GGML_CPU_FP16_TO_FP32(x[i].dmin);
 
@@ -1795,6 +1806,12 @@ void ggml_vec_dot_q4_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
 
             const __m256i scale_l = _mm256_shuffle_epi8(scales, get_scale_shuffle_k4(2*j+0));
             const __m256i scale_h = _mm256_shuffle_epi8(scales, get_scale_shuffle_k4(2*j+1));
+
+            // Prefetch next iteration's quantized data chunks
+            if (j < QK_K/64 - 1) {
+                _mm_prefetch((const char*)q4 + 64, _MM_HINT_T0);   // Next 64 bytes of q4
+                _mm_prefetch((const char*)q8 + 96, _MM_HINT_T0);   // Next 96 bytes of q8
+            }
 
             const __m256i q4bits = _mm256_loadu_si256((const __m256i*)q4); q4 += 32;
             const __m256i q4l = _mm256_and_si256(q4bits, m4);
@@ -1832,6 +1849,17 @@ void ggml_vec_dot_q4_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
 
    for (int i = 0; i < nb; ++i) {
 
+        // Prefetch next block's metadata and start of quantized data
+        if (i + 1 < nb) {
+            _mm_prefetch((const char*)&x[i+1], _MM_HINT_T0);           // q4_K header (16 bytes)
+            _mm_prefetch((const char*)&x[i+1].qs, _MM_HINT_T0);        // q4_K quantized data start
+            _mm_prefetch((const char*)&x[i+1].qs + 64, _MM_HINT_T1);   // q4_K data continued (L2)
+            _mm_prefetch((const char*)&y[i+1], _MM_HINT_T0);           // q8_K header
+            _mm_prefetch((const char*)&y[i+1].qs, _MM_HINT_T0);        // q8_K quantized data start
+            _mm_prefetch((const char*)&y[i+1].qs + 64, _MM_HINT_T1);   // q8_K data continued (L2)
+            _mm_prefetch((const char*)&y[i+1].qs + 128, _MM_HINT_T1);  // q8_K data continued (L2)
+        }
+
         const float d = y[i].d * GGML_CPU_FP16_TO_FP32(x[i].d);
         const float dmin = -y[i].d * GGML_CPU_FP16_TO_FP32(x[i].dmin);
 
@@ -1865,6 +1893,12 @@ void ggml_vec_dot_q4_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
             shuffle = _mm_add_epi16(shuffle, m2);
             const __m128i scale_h = _mm_shuffle_epi8(scales, shuffle);
             shuffle = _mm_add_epi16(shuffle, m2);
+
+            // Prefetch next iteration's quantized data chunks
+            if (j < QK_K/64 - 1) {
+                _mm_prefetch((const char*)q4 + 64, _MM_HINT_T0);   // Next 64 bytes of q4
+                _mm_prefetch((const char*)q8 + 96, _MM_HINT_T0);   // Next 96 bytes of q8
+            }
 
             __m128i q4bits = _mm_loadu_si128((const __m128i*)q4); q4 += 16;
             const __m128i q4l_0 = _mm_and_si128(q4bits, m4);

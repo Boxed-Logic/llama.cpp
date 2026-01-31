@@ -4620,9 +4620,24 @@ static void ggml_compute_forward_get_rows_q(
         const int64_t i12 = i/(ne11*ne10);
         const int64_t i11 = (i - i12*ne11*ne10)/ne10;
         const int64_t i10 = (i - i12*ne11*ne10 - i11*ne10);
+
+        // Prefetch next index value
+        if (i + 1 < ir1) {
+            const int64_t i10_next = ((i + 1) - i12*ne11*ne10 - i11*ne10);
+            _mm_prefetch((const char*)src1->data + i10_next*nb10 + i11*nb11 + i12*nb12, _MM_HINT_T0);
+        }
+
         const int64_t i01 = *(int32_t *) ((char *) src1->data + i10*nb10 + i11*nb11 + i12*nb12);
 
         GGML_ASSERT(i01 >= 0 && i01 < ne01);
+
+        // Prefetch next data row (look ahead 2 indices if possible)
+        if (i + 2 < ir1) {
+            const int64_t i10_next2 = ((i + 2) - i12*ne11*ne10 - i11*ne10);
+            const int64_t i01_next = *(int32_t *) ((char *) src1->data + i10_next2*nb10 + i11*nb11 + i12*nb12);
+            _mm_prefetch((const char*)src0->data + i01_next*nb01 + i11*nb02 + i12*nb03, _MM_HINT_T1);
+            _mm_prefetch((const char*)src0->data + i01_next*nb01 + i11*nb02 + i12*nb03 + 64, _MM_HINT_T1);
+        }
 
         dequantize_row_q(
                 (const void *) ((char *) src0->data + i01*nb01 + i11*nb02 + i12*nb03),
@@ -4661,9 +4676,24 @@ static void ggml_compute_forward_get_rows_f16(
         const int64_t i12 = i/(ne11*ne10);
         const int64_t i11 = (i - i12*ne11*ne10)/ne10;
         const int64_t i10 = (i - i12*ne11*ne10 - i11*ne10);
+
+        // Prefetch next index value
+        if (i + 1 < ir1) {
+            const int64_t i10_next = ((i + 1) - i12*ne11*ne10 - i11*ne10);
+            _mm_prefetch((const char*)src1->data + i10_next*nb10 + i11*nb11 + i12*nb12, _MM_HINT_T0);
+        }
+
         const int64_t i01 = *(int32_t *) ((char *) src1->data + i10*nb10 + i11*nb11 + i12*nb12);
 
         GGML_ASSERT(i01 >= 0 && i01 < ne01);
+
+        // Prefetch next data row (look ahead 2 indices if possible)
+        if (i + 2 < ir1) {
+            const int64_t i10_next2 = ((i + 2) - i12*ne11*ne10 - i11*ne10);
+            const int64_t i01_next = *(int32_t *) ((char *) src1->data + i10_next2*nb10 + i11*nb11 + i12*nb12);
+            _mm_prefetch((const char*)src0->data + i01_next*nb01 + i11*nb02 + i12*nb03, _MM_HINT_T1);
+            _mm_prefetch((const char*)src0->data + i01_next*nb01 + i11*nb02 + i12*nb03 + 64, _MM_HINT_T1);
+        }
 
         ggml_cpu_fp16_to_fp32(
             (const ggml_fp16_t*) ((char *) src0->data + i01*nb01 + i11*nb02 + i12*nb03),
@@ -4702,9 +4732,24 @@ static void ggml_compute_forward_get_rows_bf16(
         const int64_t i12 = i/(ne11*ne10);
         const int64_t i11 = (i - i12*ne11*ne10)/ne10;
         const int64_t i10 = (i - i12*ne11*ne10 - i11*ne10);
+
+        // Prefetch next index value
+        if (i + 1 < ir1) {
+            const int64_t i10_next = ((i + 1) - i12*ne11*ne10 - i11*ne10);
+            _mm_prefetch((const char*)src1->data + i10_next*nb10 + i11*nb11 + i12*nb12, _MM_HINT_T0);
+        }
+
         const int64_t i01 = *(int32_t *) ((char *) src1->data + i10*nb10 + i11*nb11 + i12*nb12);
 
         GGML_ASSERT(i01 >= 0 && i01 < ne01);
+
+        // Prefetch next data row (look ahead 2 indices if possible)
+        if (i + 2 < ir1) {
+            const int64_t i10_next2 = ((i + 2) - i12*ne11*ne10 - i11*ne10);
+            const int64_t i01_next = *(int32_t *) ((char *) src1->data + i10_next2*nb10 + i11*nb11 + i12*nb12);
+            _mm_prefetch((const char*)src0->data + i01_next*nb01 + i11*nb02 + i12*nb03, _MM_HINT_T1);
+            _mm_prefetch((const char*)src0->data + i01_next*nb01 + i11*nb02 + i12*nb03 + 64, _MM_HINT_T1);
+        }
 
         ggml_cpu_bf16_to_fp32(
             (const ggml_bf16_t *) ((char *) src0->data + i01*nb01 + i11*nb02 + i12*nb03),
@@ -4743,9 +4788,24 @@ static void ggml_compute_forward_get_rows_f32(
         const int64_t i12 = i/(ne11*ne10);
         const int64_t i11 = (i - i12*ne11*ne10)/ne10;
         const int64_t i10 = (i - i12*ne11*ne10 - i11*ne10);
+
+        // Prefetch next index value
+        if (i + 1 < ir1) {
+            const int64_t i10_next = ((i + 1) - i12*ne11*ne10 - i11*ne10);
+            _mm_prefetch((const char*)src1->data + i10_next*nb10 + i11*nb11 + i12*nb12, _MM_HINT_T0);
+        }
+
         const int64_t i01 = *(int32_t *) ((char *) src1->data + i10*nb10 + i11*nb11 + i12*nb12);
 
         GGML_ASSERT(i01 >= 0 && i01 < ne01);
+
+        // Prefetch next data row (look ahead 2 indices if possible)
+        if (i + 2 < ir1) {
+            const int64_t i10_next2 = ((i + 2) - i12*ne11*ne10 - i11*ne10);
+            const int64_t i01_next = *(int32_t *) ((char *) src1->data + i10_next2*nb10 + i11*nb11 + i12*nb12);
+            _mm_prefetch((const char*)src0->data + i01_next*nb01 + i11*nb02 + i12*nb03, _MM_HINT_T1);
+            _mm_prefetch((const char*)src0->data + i01_next*nb01 + i11*nb02 + i12*nb03 + 64, _MM_HINT_T1);
+        }
 
         ggml_vec_cpy_f32(nc,
                 (float *) ((char *)  dst->data + i10*nb1  + i11*nb2  + i12*nb3),

@@ -1459,6 +1459,11 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
             for (int64_t ir1 = iir1; ir1 < iir1 + blck_1 && ir1 < ir1_end; ++ir1) {
                 const int64_t _i12 = ir1; // logical row index for this expert
 
+                // Prefetch next row mappings
+                if (_i12 + 2 < ir1_end) {
+                    _mm_prefetch((const char*)&MMID_MATRIX_ROW(cur_a, _i12+2), _MM_HINT_T0);
+                }
+
                 struct mmid_row_mapping row_mapping = MMID_MATRIX_ROW(cur_a, _i12);
                 const int id       = row_mapping.i1; // selected expert index
 
@@ -1478,6 +1483,21 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
                     : (i11*nb11 + i12*nb12));
 
                 float * dst_col = (float *) ((char *) dst->data + (i1*nb1 + i2*nb2));
+
+                // Prefetch next iteration's src1_col
+                if (ir1 + 1 < ir1_end && ir1 + 1 < iir1 + blck_1) {
+                    const int64_t _i12_next = ir1 + 1;
+                    struct mmid_row_mapping row_mapping_next = MMID_MATRIX_ROW(cur_a, _i12_next);
+                    const int id_next = row_mapping_next.i1;
+                    const int64_t i11_next = id_next % ne11;
+                    const int64_t i12_next = row_mapping_next.i2;
+                    const char * next_src1_col = (const char *)wdata +
+                        (src1_cont || src1->type != vec_dot_type
+                        ? (i11_next + i12_next*ne11)*row_size
+                        : (i11_next*nb11 + i12_next*nb12));
+                    _mm_prefetch(next_src1_col, _MM_HINT_T0);
+                    _mm_prefetch(next_src1_col + 64, _MM_HINT_T0);
+                }
 
                 for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ++ir0) {
                     vec_dot(ne00, &tmp[ir0 - iir0], 0, src0_cur + ir0*nb01, 0, src1_col, 0, 1);
