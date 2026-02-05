@@ -2202,16 +2202,19 @@ private:
                 // this slot still has a prompt to be processed
                 if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
                     // wait for all children to be launched
-                    if (slot.is_parent()) {
+                    if (slot.task && slot.task->is_parent()) {
                         int n_launched = 0;
                         for (auto & other : slots) {
-                            if (other.is_processing() && other.is_child() && other.task->id_parent == slot.task->id) {
+                            if (other.is_processing() && other.task && other.task->is_child() && other.task->id_parent == slot.task->id) {
                                 ++n_launched;
                             }
                         }
 
-                        if (n_launched < slot.task->n_children) {
-                            SLT_DBG(slot, "waiting for children to be launched, n_children = %d, n_launched = %d\n", slot.task->n_children, n_launched);
+                        // with the new child_tasks vector, children are launched by launch_slots_with_parent_task
+                        // we wait until all children slots are running
+                        const int n_children = (int)slot.task->child_tasks.size();
+                        if (n_launched < n_children) {
+                            SLT_DBG(slot, "waiting for children to be launched, n_children = %d, n_launched = %d\n", n_children, n_launched);
                             continue;
                         }
                     }
