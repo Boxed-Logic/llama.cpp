@@ -7,8 +7,9 @@ This document is a complete implementation proposal for optimizing the **Granite
 AVX2. It covers both **prefill** (multi-token prompt processing) and **decode** (single-token
 generation).
 
-Five changes are proposed across four files. Combined estimate: **+15-25% prefill, +15-30%
-decode**.
+Four changes are proposed across three files. Combined estimate: **+12-20% prefill, +15-25%
+decode**. A fifth change (TENSOR_ALIGNMENT) was evaluated and rejected due to GGUF mmap
+incompatibility.
 
 ---
 
@@ -294,36 +295,23 @@ Replace the loop body at `ops.cpp:9143-9165` with:
 
 ---
 
-## Change 5: Increase TENSOR_ALIGNMENT to 64 Bytes (Global)
+## ~~Change 5: Increase TENSOR_ALIGNMENT to 64 Bytes~~ — REJECTED
 
-**File:** `ggml/src/ggml-impl.h`
-**Line:** 42
-**Targets:** All operations
+**Status: DROPPED — breaks mmap model loading.**
 
-### What
+`TENSOR_ALIGNMENT` at `ggml-impl.h:42` is constrained by the GGUF file format, which only
+guarantees 32-byte alignment (`GGUF_DEFAULT_ALIGNMENT = 32` in `gguf.h:46`). When models are
+loaded via mmap (the default path at `llama-model.cpp:7024`), tensor data is mapped directly
+from the file. Requiring 64-byte alignment would cause assertion failures at
+`ggml-backend.cpp:2268` for any mmap'd model.
 
-Change `#define TENSOR_ALIGNMENT 32` to `#define TENSOR_ALIGNMENT 64`.
+Changing `GGUF_DEFAULT_ALIGNMENT` would be a **file format breaking change** — out of scope.
 
-Currently tensor data within allocation buffers is aligned to 32 bytes (`ggml-alloc.c:81`),
-but cache lines are 64 bytes. This means ~50% of tensors start at a 32-byte offset within a
-cache line, causing every `_mm256_loadu` at the tensor start to split across two cache lines.
-
-### Exact Change
-
-```c
-- #define TENSOR_ALIGNMENT 32
-+ #define TENSOR_ALIGNMENT 64
-```
-
-### Impact
-
-| Metric | Estimate | Rationale |
-|--------|----------|-----------|
-| Prefill | **+1-3%** | Eliminates cache-line splits on tensor-start loads across all kernels |
-| Decode | **+1-2%** | Same benefit, proportionally smaller since fewer matmuls |
-| Memory overhead | **+0.01%** | At most 32 extra bytes of padding per tensor |
-
-This is a low-impact but zero-risk change that benefits every operation in the system.
+**Impact on state save/load:** None. KV cache and Mamba state serialization
+(`llama-memory-recurrent.cpp:781-860`, `llama-kv-cache.cpp:1644`) write raw tensor values
+via `io.write_tensor()`, not memory layouts. On reload, tensors are allocated in fresh
+buffers with whatever alignment the runtime provides. Alignment changes would not affect
+saved state compatibility.
 
 ---
 
@@ -335,14 +323,13 @@ This is a low-impact but zero-risk change that benefits every operation in the s
 | 2 | Repacked GEMV/GEMM prefetch | `arch/x86/repack.cpp` | **+5-10%** | +0% | None | 30 min |
 | 3 | SSM scan state prefetch | `ops.cpp` | +2-4% | **+8-15%** | None | 30 min |
 | 4 | SSM conv AVX2 vectorization | `ops.cpp` | +3-5% | +3-5% | Low | 2 hrs |
-| 5 | TENSOR_ALIGNMENT 32→64 | `ggml-impl.h` | +1-3% | +1-2% | None | 5 min |
-| | **Combined (non-additive)** | | **+12-22%** | **+15-25%** | | |
+| ~~5~~ | ~~TENSOR_ALIGNMENT 32→64~~ | ~~`ggml-impl.h`~~ | — | — | **REJECTED** | — |
+| | **Combined (non-additive)** | | **+12-20%** | **+15-25%** | | |
 
 ### Implementation Order
 
-1. **Changes 1, 2, 3, 5** — All prefetch + alignment changes. Implement together, benchmark
-   as one batch. Zero correctness risk (prefetch is non-functional; alignment is transparent).
-   **~1 hour total.**
+1. **Changes 1, 2, 3** — All prefetch changes. Implement together, benchmark as one batch.
+   Zero correctness risk (prefetch is non-functional). **~1 hour total.**
 
 2. **Change 4** — SSM conv SIMD. Implement separately since it changes computation.
    Requires careful validation. **~2 hours.**
@@ -362,10 +349,10 @@ cmake --build build -j$(nproc)
 ./build/bin/llama-cli --version
 ```
 
-### Phase 2: Correctness — Prefetch-Only Changes (1, 2, 3, 5)
+### Phase 2: Correctness — Prefetch-Only Changes (1, 2, 3)
 
-Since prefetch instructions are non-functional hints and alignment is transparent, these
-changes should produce **bit-identical output**. Verification:
+Since prefetch instructions are non-functional hints, these changes should produce
+**bit-identical output**. Verification:
 
 ```bash
 # 1. Backend ops — full test suite
@@ -479,7 +466,7 @@ perf stat -e instructions,cycles,branches,branch-misses \
 | 2. Repack prefetch | **Zero** — same reasoning | None | None |
 | 3. SSM scan prefetch | **Zero** — same reasoning | None | None |
 | 4. SSM conv SIMD | **Low** — FMA may produce slightly different float rounding vs scalar; validated by test suite | Very low — `_mm256_set_ps` construction has overhead | None for non-SSM models |
-| 5. TENSOR_ALIGNMENT | **Zero** — only changes padding between tensors | Very low — slightly more memory (~32B/tensor) | None |
+| ~~5. TENSOR_ALIGNMENT~~ | **REJECTED** — breaks mmap model loading (GGUF guarantees only 32-byte alignment) | — | — |
 
 ---
 
