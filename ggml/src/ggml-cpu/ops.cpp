@@ -9150,6 +9150,37 @@ static void ggml_compute_forward_ssm_conv_f32(
 
             // TODO: transpose the output for smaller strides for big batches?
             // d_inner
+#if defined(__AVX2__) && defined(__FMA__)
+            // Vectorize across d_inner rows: process 8 rows at a time
+            {
+                const int ir8 = ir & ~7;
+                for (int i1 = 0; i1 < ir8; i1 += 8) {
+                    __m256 sum = _mm256_setzero_ps();
+                    for (int i0 = 0; i0 < nc; ++i0) {
+                        __m256 sv = _mm256_set_ps(
+                            s[i0 + (i1+7)*ncs], s[i0 + (i1+6)*ncs],
+                            s[i0 + (i1+5)*ncs], s[i0 + (i1+4)*ncs],
+                            s[i0 + (i1+3)*ncs], s[i0 + (i1+2)*ncs],
+                            s[i0 + (i1+1)*ncs], s[i0 + (i1+0)*ncs]);
+                        __m256 cv = _mm256_set_ps(
+                            c[i0 + (i1+7)*nc], c[i0 + (i1+6)*nc],
+                            c[i0 + (i1+5)*nc], c[i0 + (i1+4)*nc],
+                            c[i0 + (i1+3)*nc], c[i0 + (i1+2)*nc],
+                            c[i0 + (i1+1)*nc], c[i0 + (i1+0)*nc]);
+                        sum = _mm256_fmadd_ps(sv, cv, sum);
+                    }
+                    _mm256_storeu_ps(x + i1, sum);
+                }
+                // Scalar remainder
+                for (int i1 = ir8; i1 < ir; ++i1) {
+                    float sumf = 0.0f;
+                    for (int i0 = 0; i0 < nc; ++i0) {
+                        sumf += s[i0 + i1*ncs] * c[i0 + i1*nc];
+                    }
+                    x[i1] = sumf;
+                }
+            }
+#else
             for (int i1 = 0; i1 < ir; ++i1) {
                 // rowwise dot product
                 // NOTE: not using ggml_vec_dot_f32, because its sum is in double precision
@@ -9161,6 +9192,7 @@ static void ggml_compute_forward_ssm_conv_f32(
                 }
                 x[i1] = sumf;
             }
+#endif
         }
     }
 }
@@ -9247,11 +9279,28 @@ static void ggml_compute_forward_ssm_scan_f32(
                     const float dA = expf(dt_soft_plus * A[h]);
                     const int g = h / (nh / ng); // repeat_interleave
 
+#if defined(__GNUC__) || defined(__clang__)
+                    // Prefetch B and C vectors for this head's group
+                    __builtin_prefetch(B + g*nc, 0, 3);
+                    __builtin_prefetch(C + g*nc, 0, 3);
+                    // Prefetch first state rows for this head
+                    __builtin_prefetch(s0 + h*nr*nc, 0, 3);
+#endif
+
                     // dim
                     for (int i1 = 0; i1 < nr; ++i1) {
                         const int ii = i1 + h*nr;
                         const float x_dt = x[ii] * dt_soft_plus;
                         float sumf = 0.0f;
+
+#if defined(__GNUC__) || defined(__clang__)
+                        // Prefetch state for 4 rows ahead
+                        if (i1 + 4 < nr) {
+                            __builtin_prefetch(s0 + (i1 + 4 + h*nr)*nc, 0, 3);
+                            __builtin_prefetch(s  + (i1 + 4 + h*nr)*nc, 1, 2);
+                        }
+#endif
+
 #if defined(GGML_SIMD)
     #if defined(__ARM_FEATURE_SVE)
                         const int ggml_f32_epr = svcntw();

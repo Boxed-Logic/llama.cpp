@@ -1447,6 +1447,16 @@ void ggml_gemv_q4_K_8x8_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const vo
 
             for (int64_t b = 0; b < nb; b++) {
 
+                // Prefetch next Q4_Kx8 block header + first cache lines of qs
+                if (b + 1 < nb) {
+                    _mm_prefetch((const char *)&b_ptr[b + 1],          _MM_HINT_T0);
+                    _mm_prefetch((const char *)b_ptr[b + 1].qs,        _MM_HINT_T0);
+                    _mm_prefetch((const char *)b_ptr[b + 1].qs + 64,   _MM_HINT_T0);
+                    _mm_prefetch((const char *)b_ptr[b + 1].qs + 128,  _MM_HINT_T0);
+                    _mm_prefetch((const char *)b_ptr[b + 1].qs + 192,  _MM_HINT_T0);
+                    _mm_prefetch((const char *)&a_ptr[b + 1],          _MM_HINT_T0);
+                }
+
                 // Load and convert to FP32 scale from block_q8_K
                 const __m256 row_scale_f32 = _mm256_set1_ps((a_ptr[b].d));
 
@@ -2757,6 +2767,15 @@ void ggml_gemm_q4_K_8x8_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const vo
 
             // For super block
             for (int64_t b = 0; b < nb; b++) {
+
+                // Prefetch next Q4_Kx8 block header + first cache lines of qs
+                if (b + 1 < nb) {
+                    _mm_prefetch((const char *)&b_ptr[b + 1],          _MM_HINT_T0);
+                    _mm_prefetch((const char *)b_ptr[b + 1].qs,        _MM_HINT_T0);
+                    _mm_prefetch((const char *)b_ptr[b + 1].qs + 64,   _MM_HINT_T0);
+                    _mm_prefetch((const char *)b_ptr[b + 1].qs + 128,  _MM_HINT_T0);
+                    _mm_prefetch((const char *)b_ptr[b + 1].qs + 192,  _MM_HINT_T0);
+                }
 
                 // Scale values - Load the eight scale values of block_q4_kx8
                 const __m256 col_scale_f32 = GGML_F32Cx8_LOAD(b_ptr[b].d);
