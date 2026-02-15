@@ -2478,11 +2478,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "note: use comma-separated values",
         [](common_params & params, const std::string & value) {
             for (const auto & item : parse_csv_row(value)) {
-                auto parts = string_split<std::string>(item, ':');
-                if (parts.size() != 2) {
+                // Split on last ':' so Windows drive letters (C:\...) are preserved
+                auto pos = item.rfind(':');
+                if (pos == std::string::npos || pos == 0 || pos == item.size() - 1) {
                     throw std::invalid_argument("lora-scaled format: FNAME:SCALE");
                 }
-                params.lora_adapters.push_back({ parts[0], std::stof(parts[1]), "", "", nullptr });
+                params.lora_adapters.push_back({ item.substr(0, pos), std::stof(item.substr(pos + 1)), "", "", nullptr });
             }
         }
         // we define this arg on both COMMON and EXPORT_LORA, so when showing help message of export-lora, it will be categorized as "example-specific" arg
@@ -2502,11 +2503,12 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "note: use comma-separated values (format: FNAME:SCALE,...)",
         [](common_params & params, const std::string & value) {
             for (const auto & item : parse_csv_row(value)) {
-                auto parts = string_split<std::string>(item, ':');
-                if (parts.size() != 2) {
+                // Split on last ':' so Windows drive letters (C:\...) are preserved
+                auto pos = item.rfind(':');
+                if (pos == std::string::npos || pos == 0 || pos == item.size() - 1) {
                     throw std::invalid_argument("control-vector-scaled format: FNAME:SCALE");
                 }
-                params.control_vectors.push_back({ std::stof(parts[1]), parts[0] });
+                params.control_vectors.push_back({ std::stof(item.substr(pos + 1)), item.substr(0, pos) });
             }
         }
     ));
