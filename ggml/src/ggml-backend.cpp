@@ -785,6 +785,8 @@ static char causes[GGML_DEFAULT_GRAPH_SIZE*16 + GGML_SCHED_MAX_SPLITS_DEBUG*GGML
 #define GET_CAUSE(node) ""
 #endif
 
+static bool ggml_backend_sched_buffer_supported(ggml_backend_sched_t sched, struct ggml_tensor * t, int backend_id);
+
 // returns the backend that should be used for the node based on the current locations
 static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, struct ggml_tensor * tensor) {
     // assign pre-allocated nodes to their backend
@@ -835,6 +837,17 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
                     }
                 }
             }
+            // reverse offload: GPU has the weight but doesn't want this op (small batch)
+            // if CPU can access the buffer natively (host buffer on iGPU), route to CPU — no copy needed
+            if (sched->op_offload && src_backend_id != sched->n_backends - 1) {
+                if (!ggml_backend_offload_op(sched->backends[src_backend_id], tensor) &&
+                    ggml_backend_supports_op(sched->backends[sched->n_backends - 1], tensor) &&
+                    ggml_backend_sched_buffer_supported(sched, (struct ggml_tensor *) src, sched->n_backends - 1)) {
+                    SET_CAUSE(tensor, "1.rev");
+                    return sched->n_backends - 1;
+                }
+            }
+
             SET_CAUSE(tensor, "1.wgt%d", i);
             return src_backend_id;
         }

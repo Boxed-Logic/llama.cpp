@@ -15007,14 +15007,20 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
 }
 
 static bool ggml_backend_vk_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
-    if (buft->iface.get_name != ggml_backend_vk_buffer_type_name) {
-        return false;
+    // Vulkan device buffer type
+    if (buft->iface.get_name == ggml_backend_vk_buffer_type_name) {
+        ggml_backend_vk_device_context * ctx = (ggml_backend_vk_device_context *)dev->context;
+        ggml_backend_vk_buffer_type_context * buft_ctx = (ggml_backend_vk_buffer_type_context *)buft->context;
+        return buft_ctx->device->idx == ctx->device;
     }
 
-    ggml_backend_vk_device_context * ctx = (ggml_backend_vk_device_context *)dev->context;
-    ggml_backend_vk_buffer_type_context * buft_ctx = (ggml_backend_vk_buffer_type_context *)buft->context;
+    // Vulkan host buffer type — supported on iGPU (UMA) for zero-copy access
+    if (buft->iface.get_name == ggml_backend_vk_host_buffer_type_name) {
+        ggml_backend_vk_device_context * ctx = (ggml_backend_vk_device_context *)dev->context;
+        return ctx->is_integrated_gpu;
+    }
 
-    return buft_ctx->device->idx == ctx->device;
+    return false;
 }
 
 static bool ggml_backend_vk_device_offload_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
