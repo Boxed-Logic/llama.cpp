@@ -15020,8 +15020,14 @@ static bool ggml_backend_vk_device_supports_buft(ggml_backend_dev_t dev, ggml_ba
 static bool ggml_backend_vk_device_offload_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     ggml_backend_vk_device_context * dev_ctx = (ggml_backend_vk_device_context *)dev->context;
 
-    return (op->ne[1] >= dev_ctx->op_offload_min_batch_size && op->op != GGML_OP_GET_ROWS) ||
-           (op->ne[2] >= dev_ctx->op_offload_min_batch_size && op->op == GGML_OP_MUL_MAT_ID);
+    switch (op->op) {
+        case GGML_OP_MUL_MAT:
+            return op->ne[1] >= dev_ctx->op_offload_min_batch_size;
+        case GGML_OP_MUL_MAT_ID:
+            return op->ne[2] >= dev_ctx->op_offload_min_batch_size;
+        default:
+            return false;
+    }
 }
 
 static ggml_backend_event_t ggml_backend_vk_device_event_new(ggml_backend_dev_t dev) {

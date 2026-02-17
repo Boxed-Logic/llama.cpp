@@ -925,12 +925,12 @@ static bool ggml_gallocr_reserve_n_impl(
                 realloc = true;
             }
         }
-        // free backend buffers that are no longer needed by the current graph
-        if (!realloc && new_size == 0 && galloc->buffers[i] != NULL && ggml_vbuffer_size(galloc->buffers[i]) > 0) {
-            fprintf(stderr, "%s: freeing unused %s buffer (was %.02f MiB)\n",
-                __func__, ggml_backend_buft_name(galloc->bufts[i]),
-                ggml_vbuffer_size(galloc->buffers[i]) / 1024.0 / 1024.0);
-            realloc = true;
+        // shrink backend buffers that are significantly oversized for the current graph
+        if (!realloc && galloc->buffers[i] != NULL) {
+            size_t cur_size = ggml_vbuffer_size(galloc->buffers[i]);
+            if (cur_size > 0 && new_size < cur_size / 2) {
+                realloc = true;
+            }
         }
         if (realloc) {
 #ifndef NDEBUG
