@@ -6066,13 +6066,6 @@ static void * ggml_vk_host_malloc(vk_device& device, size_t size) {
         {vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached,
          vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent});
 
-    fprintf(stderr, "VK host memory: %.2f MB, flags=%u (visible=%d, coherent=%d, cached=%d)\n",
-        size/1024.0/1024.0,
-        (uint32_t)buf->memory_property_flags,
-        !!(buf->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible),
-        !!(buf->memory_property_flags & vk::MemoryPropertyFlagBits::eHostCoherent),
-        !!(buf->memory_property_flags & vk::MemoryPropertyFlagBits::eHostCached));
-
     if(!(buf->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible)) {
         fprintf(stderr, "WARNING: failed to allocate %.2f MB of pinned memory\n",
             size/1024.0/1024.0);
@@ -13292,13 +13285,7 @@ static void ggml_vk_synchronize(ggml_backend_vk_context * ctx) {
 
 static void ggml_backend_vk_synchronize(ggml_backend_t backend) {
     VK_LOG_DEBUG("ggml_backend_vk_synchronize()");
-    // LLAMA_SKIP_VK_SYNC=1: skip Vulkan sync/cleanup when no work was done (diagnostic)
-    static const bool skip_idle_sync = (getenv("LLAMA_SKIP_VK_SYNC") != nullptr);
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
-
-    if (skip_idle_sync && ctx->compute_ctx.expired()) {
-        return;
-    }
 
     ggml_vk_synchronize(ctx);
 

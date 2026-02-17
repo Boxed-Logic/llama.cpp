@@ -925,6 +925,10 @@ static bool ggml_gallocr_reserve_n_impl(
                 realloc = true;
             }
         }
+        // free backend buffers that are no longer needed by the current graph
+        if (!realloc && new_size == 0 && galloc->buffers[i] != NULL && ggml_vbuffer_size(galloc->buffers[i]) > 0) {
+            realloc = true;
+        }
         if (realloc) {
 #ifndef NDEBUG
             {
