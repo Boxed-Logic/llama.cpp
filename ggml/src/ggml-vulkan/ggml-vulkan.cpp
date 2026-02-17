@@ -12318,11 +12318,18 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
             if (unsynced_nodes.size() == 0) {
                 return false;
             }
+            // Host buffers (e.g. iGPU zero-copy weights) can't overlap with device buffers
+            if (!ggml_backend_buffer_is_vk(node->buffer)) {
+                return false;
+            }
             auto n_base = vk_tensor_offset(node) + node->view_offs;
             auto n_size = ggml_nbytes(node);
             ggml_backend_vk_buffer_context * a_buf_ctx = (ggml_backend_vk_buffer_context *)node->buffer->context;
             vk_buffer a_buf = a_buf_ctx->dev_buffer;
             for (auto &other : unsynced_nodes) {
+                if (!ggml_backend_buffer_is_vk(other->buffer)) {
+                    continue;
+                }
                 ggml_backend_vk_buffer_context * o_buf_ctx = (ggml_backend_vk_buffer_context *)other->buffer->context;
                 vk_buffer o_buf = o_buf_ctx->dev_buffer;
                 if (a_buf == o_buf) {
@@ -13146,6 +13153,12 @@ static void ggml_backend_vk_set_tensor_async(ggml_backend_t backend, ggml_tensor
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
     GGML_ASSERT((tensor->buffer->buft == ggml_backend_vk_get_default_buffer_type(backend) || tensor->buffer->buft == ggml_backend_vk_host_buffer_type()) && "unsupported buffer type");
 
+    // Host buffer: data is directly accessible, just memcpy
+    if (tensor->buffer->buft == ggml_backend_vk_host_buffer_type()) {
+        memcpy((char *)tensor->data + offset, data, size);
+        return;
+    }
+
     ggml_backend_vk_buffer_context * buf_ctx = (ggml_backend_vk_buffer_context *)tensor->buffer->context;
 
     vk_context compute_ctx;
@@ -13185,6 +13198,12 @@ static void ggml_backend_vk_get_tensor_async(ggml_backend_t backend, const ggml_
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
     GGML_ASSERT((tensor->buffer->buft == ggml_backend_vk_get_default_buffer_type(backend) || tensor->buffer->buft == ggml_backend_vk_host_buffer_type()) && "unsupported buffer type");
 
+    // Host buffer: data is directly accessible, just memcpy
+    if (tensor->buffer->buft == ggml_backend_vk_host_buffer_type()) {
+        memcpy(data, (const char *)tensor->data + offset, size);
+        return;
+    }
+
     ggml_backend_vk_buffer_context * buf_ctx = (ggml_backend_vk_buffer_context *)tensor->buffer->context;
 
     vk_context compute_ctx;
@@ -13222,7 +13241,7 @@ static void ggml_backend_vk_get_tensor_async(ggml_backend_t backend, const ggml_
 static bool ggml_backend_vk_cpy_tensor_async(ggml_backend_t backend, const ggml_tensor * src, ggml_tensor * dst) {
     VK_LOG_DEBUG("ggml_backend_vk_cpy_tensor_async()");
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
-    if ((dst->buffer->buft == ggml_backend_vk_get_default_buffer_type(backend) || dst->buffer->buft == ggml_backend_vk_host_buffer_type()) && ggml_backend_buffer_is_vk(src->buffer)) {
+    if (ggml_backend_buffer_is_vk(dst->buffer) && ggml_backend_buffer_is_vk(src->buffer)) {
         ggml_backend_vk_buffer_context * src_buf_ctx = (ggml_backend_vk_buffer_context *)src->buffer->context;
         ggml_backend_vk_buffer_context * dst_buf_ctx = (ggml_backend_vk_buffer_context *)dst->buffer->context;
 
@@ -13585,6 +13604,10 @@ static bool ggml_vk_can_fuse_rope_set_rows(ggml_backend_vk_context * ctx, const 
 // to overlap if they are exactly equal.
 // XXX TODO this check is probably missing from several fusion optimizations.
 static bool ggml_vk_tensors_overlap_but_not_equal(const ggml_tensor * a, const ggml_tensor * b) {
+    // Host buffers (e.g. iGPU zero-copy weights) can't overlap with device buffers
+    if (!ggml_backend_buffer_is_vk(a->buffer) || !ggml_backend_buffer_is_vk(b->buffer)) {
+        return false;
+    }
     ggml_backend_vk_buffer_context * a_buf_ctx = (ggml_backend_vk_buffer_context *)a->buffer->context;
     vk_buffer a_buf = a_buf_ctx->dev_buffer;
     ggml_backend_vk_buffer_context * b_buf_ctx = (ggml_backend_vk_buffer_context *)b->buffer->context;
