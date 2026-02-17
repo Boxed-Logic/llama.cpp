@@ -1884,10 +1884,14 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
 
         auto * buft = ggml_backend_cpu_buffer_type();
         // try to use the host buffer of the device where the output tensor is allocated for faster transfer to system memory
+        // skip on iGPU: the host buffer type is also supported by the Vulkan backend there (for zero-copy weights),
+        // which would cause the scheduler to assign the output tensor to Vulkan instead of CPU
         auto * output_dev = model.dev_output();
-        auto * output_dev_host_buft = output_dev ? ggml_backend_dev_host_buffer_type(output_dev) : nullptr;
-        if (output_dev_host_buft) {
-            buft = output_dev_host_buft;
+        if (output_dev && ggml_backend_dev_type(output_dev) != GGML_BACKEND_DEVICE_TYPE_IGPU) {
+            auto * output_dev_host_buft = ggml_backend_dev_host_buffer_type(output_dev);
+            if (output_dev_host_buft) {
+                buft = output_dev_host_buft;
+            }
         }
         buf_output.reset(ggml_backend_buft_alloc_buffer(buft, new_size));
         if (buf_output == nullptr) {
