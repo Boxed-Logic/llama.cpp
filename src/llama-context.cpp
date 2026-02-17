@@ -210,12 +210,15 @@ llama_context::llama_context(
 
     if (!hparams.vocab_only) {
         // GPU backends
-        for (auto * dev : model.devices) {
-            ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
-            if (backend == nullptr) {
-                throw std::runtime_error(format("failed to initialize %s backend", ggml_backend_dev_name(dev)));
+        // LLAMA_NO_GPU_BACKEND=1: skip GPU backend init (diagnostic - keeps model.devices but no GPU in scheduler)
+        if (!getenv("LLAMA_NO_GPU_BACKEND")) {
+            for (auto * dev : model.devices) {
+                ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
+                if (backend == nullptr) {
+                    throw std::runtime_error(format("failed to initialize %s backend", ggml_backend_dev_name(dev)));
+                }
+                backends.emplace_back(backend);
             }
-            backends.emplace_back(backend);
         }
 
         // add ACCEL backends (such as BLAS)

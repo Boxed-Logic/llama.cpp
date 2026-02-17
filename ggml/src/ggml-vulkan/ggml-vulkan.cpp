@@ -13292,7 +13292,13 @@ static void ggml_vk_synchronize(ggml_backend_vk_context * ctx) {
 
 static void ggml_backend_vk_synchronize(ggml_backend_t backend) {
     VK_LOG_DEBUG("ggml_backend_vk_synchronize()");
+    // LLAMA_SKIP_VK_SYNC=1: skip Vulkan sync/cleanup when no work was done (diagnostic)
+    static const bool skip_idle_sync = (getenv("LLAMA_SKIP_VK_SYNC") != nullptr);
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
+
+    if (skip_idle_sync && ctx->compute_ctx.expired()) {
+        return;
+    }
 
     ggml_vk_synchronize(ctx);
 
