@@ -288,10 +288,13 @@ llama_context::llama_context(
 
             if (backend_type == GGML_BACKEND_DEVICE_TYPE_CPU && !model.devices.empty()) {
                 // use the host buffer of the first device CPU for faster transfer of the intermediate state
-                auto * dev = model.devices[0];
-                auto * host_buft = ggml_backend_dev_host_buffer_type(dev);
-                if (host_buft) {
-                    buft = host_buft;
+                // set LLAMA_NO_HOST_BUFFER=1 to disable (for testing pinned memory impact)
+                if (!getenv("LLAMA_NO_HOST_BUFFER")) {
+                    auto * dev = model.devices[0];
+                    auto * host_buft = ggml_backend_dev_host_buffer_type(dev);
+                    if (host_buft) {
+                        buft = host_buft;
+                    }
                 }
             }
 

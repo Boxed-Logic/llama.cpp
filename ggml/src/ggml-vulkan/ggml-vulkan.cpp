@@ -6066,6 +6066,13 @@ static void * ggml_vk_host_malloc(vk_device& device, size_t size) {
         {vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached,
          vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent});
 
+    fprintf(stderr, "VK host memory: %.2f MB, flags=%u (visible=%d, coherent=%d, cached=%d)\n",
+        size/1024.0/1024.0,
+        (uint32_t)buf->memory_property_flags,
+        !!(buf->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible),
+        !!(buf->memory_property_flags & vk::MemoryPropertyFlagBits::eHostCoherent),
+        !!(buf->memory_property_flags & vk::MemoryPropertyFlagBits::eHostCached));
+
     if(!(buf->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible)) {
         fprintf(stderr, "WARNING: failed to allocate %.2f MB of pinned memory\n",
             size/1024.0/1024.0);
