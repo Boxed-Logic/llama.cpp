@@ -1477,6 +1477,13 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         int split_backend_id = split->backend_id;
         ggml_backend_t split_backend = sched->backends[split_backend_id];
 
+        // when transitioning between backends, ensure the previous backend has completed
+        // this is necessary when is_host buffers allow zero-copy cross-backend access,
+        // since the input copy synchronization may be skipped
+        if (split_id > 0 && splits[split_id - 1].backend_id != split_backend_id) {
+            ggml_backend_synchronize(sched->backends[splits[split_id - 1].backend_id]);
+        }
+
         // copy the input tensors to the split backend
         for (int input_id = 0; input_id < split->n_inputs; input_id++) {
             ggml_backend_t input_backend = ggml_backend_sched_get_tensor_backend(sched, split->inputs[input_id]);
