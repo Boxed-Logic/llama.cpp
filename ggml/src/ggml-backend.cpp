@@ -834,6 +834,12 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
                         return b;
                     }
                 }
+                // offload_op returned false for all backends
+                // for non-matmul ops, leave unassigned so Pass 2 can absorb them
+                // into adjacent GPU regions (avoids unnecessary graph splits)
+                if (tensor->op != GGML_OP_MUL_MAT && tensor->op != GGML_OP_MUL_MAT_ID) {
+                    return -1;
+                }
             }
             SET_CAUSE(tensor, "1.wgt%d", i);
             return src_backend_id;
