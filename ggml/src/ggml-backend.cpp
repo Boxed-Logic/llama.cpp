@@ -828,16 +828,27 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
             int src_backend_id = ggml_backend_sched_backend_from_buffer(sched, src, tensor);
             // check if a backend with higher prio wants to offload the op
             if (sched->op_offload && src_backend_id == sched->n_backends - 1 && ggml_backend_buffer_is_host(src->buffer)) {
+                // forward offload: weights on CPU, check if an accelerator wants the op
                 for (int b = 0; b < src_backend_id; b++) {
                     if (ggml_backend_supports_op(sched->backends[b], tensor) && ggml_backend_offload_op(sched->backends[b], tensor)) {
                         SET_CAUSE(tensor, "1.off");
                         return b;
                     }
                 }
-                // offload_op returned false for all backends
-                // for non-matmul ops, leave unassigned so Pass 2 can absorb them
-                // into adjacent GPU regions (avoids unnecessary graph splits)
-                if (tensor->op != GGML_OP_MUL_MAT && tensor->op != GGML_OP_MUL_MAT_ID) {
+            }
+            if (sched->op_offload && src_backend_id != sched->n_backends - 1 && ggml_backend_buffer_is_host(src->buffer)) {
+                // reverse offload: weights on accelerator with host-accessible buffer,
+                // but no accelerator wants to offload this op (e.g. small batch on iGPU).
+                // Return unassigned so Pass 2 expansion can absorb it into the
+                // neighboring backend (GPU during prefill, CPU during decode via Pass 3).
+                bool any_offload = false;
+                for (int b = 0; b < sched->n_backends - 1; b++) {
+                    if (ggml_backend_supports_op(sched->backends[b], tensor) && ggml_backend_offload_op(sched->backends[b], tensor)) {
+                        any_offload = true;
+                        break;
+                    }
+                }
+                if (!any_offload) {
                     return -1;
                 }
             }
@@ -1080,8 +1091,13 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         int * node_backend_id = &tensor_backend_id(node);
         if (*node_backend_id == -1) {
             // unassigned node: find the backend with the most supported inputs
+            // skip accelerators that don't want to offload this op (reverse offload path:
+            // prevents re-assigning to GPU ops that were intentionally left unassigned in Pass 1)
             int n_supported_best = -1;
             for (int b = 0; b < sched->n_backends; b++) {
+                if (sched->op_offload && b != sched->n_backends - 1 && !ggml_backend_offload_op(sched->backends[b], node)) {
+                    continue;
+                }
                 if (ggml_backend_supports_op(sched->backends[b], node)) {
                     int n_supported = 0;
                     for (int j = 0; j < GGML_MAX_SRC; j++) {

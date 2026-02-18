@@ -229,13 +229,14 @@ static ggml_backend_buffer_t ggml_backend_vk_buffer_type_alloc_buffer(ggml_backe
 static size_t ggml_backend_vk_buffer_type_get_alignment(ggml_backend_buffer_type_t buft);
 static size_t ggml_backend_vk_buffer_type_get_max_size(ggml_backend_buffer_type_t buft);
 static size_t ggml_backend_vk_buffer_type_get_alloc_size(ggml_backend_buffer_type_t buft, const ggml_tensor * tensor);
+static bool ggml_backend_vk_buffer_type_is_host(ggml_backend_buffer_type_t buft);
 static ggml_backend_buffer_type_i ggml_backend_vk_buffer_type_interface = {
     /* .get_name         = */ ggml_backend_vk_buffer_type_name,
     /* .alloc_buffer     = */ ggml_backend_vk_buffer_type_alloc_buffer,
     /* .get_alignment    = */ ggml_backend_vk_buffer_type_get_alignment,
     /* .get_max_size     = */ ggml_backend_vk_buffer_type_get_max_size,
     /* .get_alloc_size   = */ ggml_backend_vk_buffer_type_get_alloc_size,
-    /* .is_host          = */ NULL,
+    /* .is_host          = */ ggml_backend_vk_buffer_type_is_host,
 };
 
 class vk_memory_logger;
@@ -1864,10 +1865,8 @@ struct ggml_backend_vk_context {
 static void * const vk_ptr_base = (void *)(uintptr_t) 0x1000;  // NOLINT
 
 static uint64_t vk_tensor_offset(const ggml_tensor * tensor) {
-    if (tensor->view_src) {
-        return (uint8_t *) tensor->view_src->data - (uint8_t *) vk_ptr_base;
-    }
-    return (uint8_t *) tensor->data - (uint8_t *) vk_ptr_base;
+    const ggml_tensor * t = tensor->view_src ? tensor->view_src : tensor;
+    return (uint8_t *) t->data - (uint8_t *) ggml_backend_buffer_get_base(t->buffer);
 }
 
 static uint32_t get_misalign_bytes(const ggml_backend_vk_context * ctx, const ggml_tensor * t)
@@ -12917,9 +12916,14 @@ static void ggml_backend_vk_buffer_free_buffer(ggml_backend_buffer_t buffer) {
 }
 
 static void * ggml_backend_vk_buffer_get_base(ggml_backend_buffer_t buffer) {
+    ggml_backend_vk_buffer_context * ctx = (ggml_backend_vk_buffer_context *)buffer->context;
+    // On iGPU (UMA), device memory is host-visible and mapped.
+    // Return the real mapped pointer so tensors get valid host addresses,
+    // enabling zero-copy CPU access for reverse offload.
+    if (ctx->dev_buffer->ptr) {
+        return ctx->dev_buffer->ptr;
+    }
     return vk_ptr_base;
-
-    UNUSED(buffer);
 }
 
 static enum ggml_status ggml_backend_vk_buffer_init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
@@ -13028,6 +13032,11 @@ static size_t ggml_backend_vk_buffer_type_get_alloc_size(ggml_backend_buffer_typ
     return ggml_nbytes(tensor);
 
     UNUSED(buft);
+}
+
+static bool ggml_backend_vk_buffer_type_is_host(ggml_backend_buffer_type_t buft) {
+    ggml_backend_vk_buffer_type_context * ctx = (ggml_backend_vk_buffer_type_context *)buft->context;
+    return ctx->device->uma;
 }
 
 ggml_backend_buffer_type_t ggml_backend_vk_buffer_type(size_t dev_num) {
