@@ -974,14 +974,7 @@ static struct llama_model * llama_model_load_from_file_impl(
 
         // add integrated GPUs only if no other devices were found
         if (model->devices.empty()) {
-            // if only iGPUs are available and user didn't explicitly set -ngl,
-            // default to 0 layers (CPU-only) since iGPU offloading shares system
-            // RAM and adds overhead without benefit
-            if (!igpus.empty() && params.n_gpu_layers == -1) {
-                LLAMA_LOG_INFO("%s: only integrated GPU(s) detected, defaulting to -ngl 0 (CPU-only)\n", __func__);
-            } else {
-                model->devices.insert(model->devices.end(), igpus.begin(), igpus.end());
-            }
+            model->devices.insert(model->devices.end(), igpus.begin(), igpus.end());
         }
     }
 

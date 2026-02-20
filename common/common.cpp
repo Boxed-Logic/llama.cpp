@@ -1,4 +1,5 @@
 #include "ggml.h"
+#include "ggml-backend.h"
 #include "gguf.h"
 
 #include "common.h"
@@ -1047,6 +1048,21 @@ common_init_result::common_init_result(common_params & params) :
     pimpl(new impl{}) {
     auto mparams = common_model_params_to_llama(params);
     auto cparams = common_context_params_to_llama(params);
+
+    // If only iGPUs are available and user didn't explicitly set -ngl, default to 0 (CPU-only)
+    if (mparams.n_gpu_layers == -1) {
+        bool has_dgpu = false;
+        bool has_igpu = false;
+        for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
+            auto type = ggml_backend_dev_type(ggml_backend_dev_get(i));
+            if (type == GGML_BACKEND_DEVICE_TYPE_GPU)  has_dgpu = true;
+            if (type == GGML_BACKEND_DEVICE_TYPE_IGPU) has_igpu = true;
+        }
+        if (has_igpu && !has_dgpu) {
+            LOG_INF("%s: only integrated GPU(s) detected, defaulting to -ngl 0 (CPU-only)\n", __func__);
+            mparams.n_gpu_layers = 0;
+        }
+    }
 
     if (params.fit_params) {
         LOG_INF("%s: fitting params to device memory, for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on\n", __func__);
