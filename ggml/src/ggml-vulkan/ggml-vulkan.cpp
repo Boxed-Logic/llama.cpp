@@ -15474,7 +15474,9 @@ static int64_t ggml_vk_get_op_batch_size(const ggml_tensor * op) {
 static bool ggml_backend_vk_device_offload_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     ggml_backend_vk_device_context * dev_ctx = (ggml_backend_vk_device_context *)dev->context;
 
-    return ggml_vk_get_op_batch_size(op) >= dev_ctx->op_offload_min_batch_size;
+    return (op->op == GGML_OP_MUL_MAT ||
+            op->op == GGML_OP_MUL_MAT_ID) &&
+            ggml_vk_get_op_batch_size(op) >= dev_ctx->op_offload_min_batch_size;
 }
 
 static ggml_backend_event_t ggml_backend_vk_device_event_new(ggml_backend_dev_t dev) {
