@@ -87,6 +87,7 @@ jobs:
             -DGGML_NATIVE=OFF \
             -DGGML_CPU_ALL_VARIANTS=ON \
             -DLLAMA_CURL=OFF \
+            -DLLAMA_OPENSSL=OFF \
             ${{ env.CMAKE_ARGS }}
           cmake --build build --config Release -j $(nproc)
 
@@ -141,6 +142,7 @@ jobs:
             -DGGML_CPU_ALL_VARIANTS=ON ^
             -DGGML_OPENMP=ON ^
             -DLLAMA_CURL=OFF ^
+            -DLLAMA_OPENSSL=OFF ^
             ${{ env.CMAKE_ARGS }}
           cmake --build build --config Release
 
@@ -356,6 +358,7 @@ jobs:
             -DGGML_METAL_EMBED_LIBRARY=ON \
             -DGGML_RPC=ON \
             -DLLAMA_CURL=OFF \
+            -DLLAMA_OPENSSL=OFF \
             ${{ env.CMAKE_ARGS }}
           cmake --build build --config Release -j $(sysctl -n hw.logicalcpu)
 
