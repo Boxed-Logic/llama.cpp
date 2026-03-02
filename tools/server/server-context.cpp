@@ -1842,6 +1842,38 @@ private:
                         nwrite = llama_state_seq_save_file(ctx, filepath.c_str(), slot->id, tokens.data(), token_count);
                     }
 
+                    // Write LoRA sidecar (always, alongside any slot save)
+                    {
+                        const std::string lora_path = filepath + ".lora.json";
+                        const std::string lora_tmp  = lora_path + ".tmp";
+                        json lora_sidecar;
+                        lora_sidecar["lora_sidecar_version"] = 1;
+                        lora_sidecar["alora_invocation_start"] = slot->alora_invocation_start;
+                        json adapters_json = json::array();
+                        for (const auto & la : slot->lora) {
+                            adapters_json.push_back({{"path", la.path}, {"scale", la.scale}});
+                        }
+                        lora_sidecar["adapters"] = adapters_json;
+
+                        std::ofstream ofs(lora_tmp, std::ios::binary | std::ios::trunc);
+                        if (ofs.is_open()) {
+                            ofs << lora_sidecar.dump();
+                            ofs.close();
+                            std::error_code ec;
+                            std::filesystem::rename(lora_tmp, lora_path, ec);
+                            if (ec) {
+                                std::filesystem::remove(lora_path, ec);
+                                ec.clear();
+                                std::filesystem::rename(lora_tmp, lora_path, ec);
+                            }
+                            if (ec) {
+                                SLT_WRN(*slot, "failed to write LoRA sidecar: %s\n", lora_path.c_str());
+                            }
+                        } else {
+                            SLT_WRN(*slot, "failed to open LoRA sidecar for writing: %s\n", lora_tmp.c_str());
+                        }
+                    }
+
                     const int64_t t_end = ggml_time_us();
                     const double t_save_ms = (t_end - t_start) / 1000.0;
 
@@ -1922,6 +1954,52 @@ private:
                     } else {
                         slot->prompt.tokens.clear();
                         slot->prompt.tokens.insert(tokens);
+                    }
+
+                    // Restore LoRA sidecar (optional — don't fail restore if missing)
+                    {
+                        const std::string lora_path = filepath + ".lora.json";
+                        if (std::filesystem::exists(lora_path)) {
+                            std::ifstream ifs(lora_path, std::ios::binary);
+                            if (ifs.is_open()) {
+                                std::string buf((std::istreambuf_iterator<char>(ifs)),
+                                                 std::istreambuf_iterator<char>());
+                                ifs.close();
+                                const json lora_sidecar = json::parse(buf, nullptr, false);
+                                if (!lora_sidecar.is_discarded() &&
+                                    lora_sidecar.value("lora_sidecar_version", 0) == 1) {
+
+                                    // Reconstruct slot->lora by matching saved paths to loaded adapters
+                                    auto restored_lora = params_base.lora_adapters; // copy (gets correct ptrs)
+                                    bool lora_match = true;
+                                    const auto & saved_adapters = lora_sidecar["adapters"];
+
+                                    if (saved_adapters.size() == restored_lora.size()) {
+                                        for (size_t i = 0; i < restored_lora.size(); ++i) {
+                                            const std::string saved_path  = saved_adapters[i].value("path", "");
+                                            const float       saved_scale = saved_adapters[i].value("scale", 0.0f);
+                                            if (saved_path != restored_lora[i].path) {
+                                                lora_match = false; // adapter set has changed since save
+                                                break;
+                                            }
+                                            restored_lora[i].scale = saved_scale;
+                                        }
+                                    } else {
+                                        lora_match = false;
+                                    }
+
+                                    if (lora_match) {
+                                        slot->lora = std::move(restored_lora);
+                                        slot->alora_invocation_start = lora_sidecar.value("alora_invocation_start", -1);
+                                        SLT_INF(*slot, "%s", "restored LoRA state from sidecar\n");
+                                    } else {
+                                        SLT_WRN(*slot, "%s", "LoRA sidecar adapter set does not match current server config; cache will be cleared on next request\n");
+                                        // slot->lora stays as default — are_lora_equal() will fail on next request
+                                        // and trigger correct cache invalidation
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     const int64_t t_end = ggml_time_us();
