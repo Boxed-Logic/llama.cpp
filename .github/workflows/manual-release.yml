@@ -1,0 +1,383 @@
+name: Manual Release (Win Vulkan/SYCL x64 + macOS Metal + Linux CPU) - R2 Upload
+
+on:
+  workflow_dispatch: # manual only
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+  CMAKE_ARGS: "-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DGGML_RPC=ON"
+  R2_BUCKET: bl-llama-cpp
+
+jobs:
+  server_tests:
+    name: Server tests (gate)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install \
+            build-essential \
+            xxd \
+            git \
+            cmake \
+            curl \
+            wget \
+            language-pack-en \
+            libssl-dev
+
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build llama-server
+        run: |
+          cmake -B build -DLLAMA_CURL=OFF -DLLAMA_BUILD_BORINGSSL=ON
+          cmake --build build --config Release -j $(nproc) --target llama-server
+
+      - name: Python setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Tests dependencies
+        run: |
+          pip install -r tools/server/tests/requirements.txt
+
+      - name: Tests
+        run: |
+          cd tools/server/tests
+          pytest -v -x -m "not slow"
+
+  linux_cpu_x64:
+    name: Linux CPU x64
+    needs: [server_tests]
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.16
+        with:
+          key: ubuntu-cpu-cmake-x64
+          evict-old-files: 1d
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev
+
+      - name: Build
+        run: |
+          cmake -B build \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DGGML_BACKEND_DL=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CPU_ALL_VARIANTS=ON \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_OPENSSL=OFF \
+            ${{ env.CMAKE_ARGS }}
+          cmake --build build --config Release -j $(nproc)
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p upload
+          find ./build/bin -name "*.so" -exec cp {} ./upload/ \;
+          cp ./build/bin/llama-server ./upload/boxed-logic-engine
+
+      - name: Install AWS CLI
+        run: |
+          pip install awscli
+
+      - name: Upload to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        run: |
+          aws s3 sync ./upload/ s3://${{ env.R2_BUCKET }}/linux/cpu/ --endpoint-url ${{ env.AWS_ENDPOINT_URL }}
+
+  windows_cpu_x64:
+    name: Windows CPU x64
+    needs: [server_tests]
+    runs-on: windows-2025
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.16
+        with:
+          key: windows-latest-cmake-cpu-x64
+          variant: ccache
+          evict-old-files: 1d
+
+      - name: Install Ninja
+        run: choco install ninja
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -D CMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_CPU_ALL_VARIANTS=ON ^
+            -DGGML_OPENMP=ON ^
+            -DLLAMA_CURL=OFF ^
+            -DLLAMA_OPENSSL=OFF ^
+            ${{ env.CMAKE_ARGS }}
+          cmake --build build --config Release
+
+      - name: Prepare CPU artifacts
+        run: |
+          New-Item -ItemType Directory -Force -Path .\cpu-artifacts
+          Copy-Item "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC\14.44.35112\debug_nonredist\x64\Microsoft.VC143.OpenMP.LLVM\libomp140.x86_64.dll" .\cpu-artifacts\
+          Get-ChildItem -Path .\build\bin\Release\*.dll | Copy-Item -Destination .\cpu-artifacts\
+          Copy-Item .\build\bin\Release\llama-server.exe .\cpu-artifacts\
+
+      - name: Upload CPU backends artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-backends
+          path: cpu-artifacts/
+          retention-days: 1
+
+  windows_vulkan_x64:
+    name: Windows Vulkan x64
+    needs: [windows_cpu_x64]
+    runs-on: windows-2025
+
+    env:
+      VULKAN_VERSION: 1.4.313.2
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.16
+        with:
+          key: windows-latest-cmake-vulkan-x64
+          variant: ccache
+          evict-old-files: 1d
+
+      - name: Install Ninja
+        run: choco install ninja
+
+      - name: Install Vulkan SDK
+        run: |
+          curl.exe -o $env:RUNNER_TEMP/VulkanSDK-Installer.exe -L "https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_VERSION }}/windows/vulkansdk-windows-X64-${{ env.VULKAN_VERSION }}.exe"
+          & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\VulkanSDK\${{ env.VULKAN_VERSION }}"
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\${{ env.VULKAN_VERSION }}\bin"
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_CPU=OFF ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_VULKAN=ON
+          cmake --build build --config Release --target ggml-vulkan
+
+      - name: Download CPU backends
+        uses: actions/download-artifact@v4
+        with:
+          name: cpu-backends
+          path: ./cpu-backends
+
+      - name: Prepare artifacts
+        run: |
+          New-Item -ItemType Directory -Force -Path .\upload
+          Copy-Item .\build\bin\Release\ggml-vulkan.dll .\upload\
+          Copy-Item .\cpu-backends\*.dll -Destination .\upload\
+          Copy-Item .\cpu-backends\llama-server.exe .\upload\boxed-logic-engine.exe
+
+      - name: Install Python and AWS CLI
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install awscli
+
+      - name: Upload to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        run: |
+          Write-Host "Starting upload to R2..."
+          aws s3 sync ./upload/ s3://${{ env.R2_BUCKET }}/windows/vulkan/ --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          Write-Host "Upload completed"
+
+  windows_sycl_x64:
+    name: Windows SYCL x64
+    needs: [windows_cpu_x64]
+    runs-on: windows-2022
+
+    env:
+      WINDOWS_BASEKIT_URL: https://registrationcenter-download.intel.com/akdlm/IRC_NAS/24751ead-ddc5-4479-b9e6-f9fe2ff8b9f2/intel-deep-learning-essentials-2025.2.1.25_offline.exe
+      WINDOWS_DPCPP_MKL: intel.oneapi.win.cpp-dpcpp-common:intel.oneapi.win.mkl.devel:intel.oneapi.win.dnnl:intel.oneapi.win.tbb.devel
+      ONEAPI_ROOT: "C:/Program Files (x86)/Intel/oneAPI"
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.16
+        with:
+          key: windows-cmake-sycl-x64
+          variant: ccache
+          evict-old-files: 1d
+
+      - name: Install Intel oneAPI
+        shell: bash
+        run: scripts/install-oneapi.bat $WINDOWS_BASEKIT_URL $WINDOWS_DPCPP_MKL
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" intel64 --force
+          cmake -G "Ninja" -B build ^
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=icx ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DGGML_BACKEND_DL=ON -DBUILD_SHARED_LIBS=ON ^
+            -DGGML_CPU=OFF ^
+            -DGGML_SYCL=ON ^
+            -DGGML_NATIVE=OFF
+          cmake --build build --target ggml-sycl -j
+
+      - name: Copy Intel oneAPI runtime DLLs
+        shell: bash
+        run: |
+          echo "Copying oneAPI runtime DLLs to build/bin"
+          cp "${{ env.ONEAPI_ROOT }}/mkl/latest/bin/mkl_sycl_blas.5.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/mkl/latest/bin/mkl_core.2.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/mkl/latest/bin/mkl_tbb_thread.2.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/ur_adapter_level_zero.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/ur_adapter_level_zero_v2.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/ur_adapter_opencl.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/ur_loader.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/ur_win_proxy_loader.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/sycl8.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/svml_dispmd.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/libmmd.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/libiomp5md.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/sycl-ls.exe" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/libsycl-fallback-bfloat16.spv" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/compiler/latest/bin/libsycl-native-bfloat16.spv" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/dnnl/latest/bin/dnnl.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/tbb/latest/bin/tbb12.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/tcm/latest/bin/tcm.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/tcm/latest/bin/libhwloc-15.dll" ./build/bin/
+          cp "${{ env.ONEAPI_ROOT }}/umf/latest/bin/umf.dll" ./build/bin/
+
+      - name: Download CPU backends
+        uses: actions/download-artifact@v4
+        with:
+          name: cpu-backends
+          path: ./cpu-backends
+
+      - name: Prepare artifacts
+        run: |
+          New-Item -ItemType Directory -Force -Path .\upload
+          Copy-Item .\build\bin\ggml-sycl.dll .\upload\
+          Get-ChildItem -Path .\build\bin\*.dll | Where-Object { $_.Name -ne 'ggml-sycl.dll' } | Copy-Item -Destination .\upload\
+          Copy-Item .\build\bin\sycl-ls.exe .\upload\
+          Get-ChildItem -Path .\build\bin\*.spv | Copy-Item -Destination .\upload\
+          Copy-Item .\cpu-backends\*.dll -Destination .\upload\
+          Copy-Item .\cpu-backends\llama-server.exe .\upload\boxed-logic-engine.exe
+
+      - name: Install Python and AWS CLI
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install awscli
+
+      - name: Upload to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        run: |
+          Write-Host "Starting upload to R2..."
+          aws s3 sync ./upload/ s3://${{ env.R2_BUCKET }}/windows/sycl/ --endpoint-url https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          Write-Host "Upload completed"
+
+  macos_metal_arm64:
+    name: macOS Metal arm64
+    needs: [server_tests]
+    runs-on: macos-14
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.16
+        with:
+          key: macOS-latest-cmake-arm64
+          evict-old-files: 1d
+
+      - name: Build
+        id: cmake_build
+        run: |
+          sysctl -a
+          cmake -B build \
+            -DCMAKE_INSTALL_RPATH='@loader_path' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DLLAMA_FATAL_WARNINGS=ON \
+            -DGGML_METAL_USE_BF16=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DGGML_RPC=ON \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_OPENSSL=OFF \
+            ${{ env.CMAKE_ARGS }}
+          cmake --build build --config Release -j $(sysctl -n hw.logicalcpu)
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p upload
+          find ./build/bin -name "*.dylib" -exec cp {} ./upload/ \;
+          cp ./build/bin/llama-server ./upload/boxed-logic-engine
+
+      - name: Install AWS CLI
+        run: |
+          pip install awscli
+
+      - name: Upload to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        run: |
+          aws s3 sync ./upload/ s3://${{ env.R2_BUCKET }}/macos/ --endpoint-url ${{ env.AWS_ENDPOINT_URL }}
+
