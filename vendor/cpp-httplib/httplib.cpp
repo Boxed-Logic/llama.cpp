@@ -1638,14 +1638,46 @@ Error wait_until_socket_is_ready(socket_t sock, time_t sec,
 }
 
 bool is_socket_alive(socket_t sock) {
-  const auto val = detail::select_read(sock, 0, 0);
-  if (val == 0) {
-    return true;
-  } else if (val < 0 && errno == EBADF) {
+  struct pollfd pfd;
+  pfd.fd = sock;
+  pfd.events = POLLIN;
+  pfd.revents = 0;
+
+  auto poll_ret = handle_EINTR([&]() { return poll_wrapper(&pfd, 1, 0); });
+
+  if (poll_ret == 0) {
+    return true;  // no events, socket is idle and alive
+  } else if (poll_ret < 0) {
+#ifdef _WIN32
+    auto err = WSAGetLastError();
+    fprintf(stderr, "[is_socket_alive] WSAPoll error: poll_ret=%d WSAError=%d sock=%llu\n",
+            (int)poll_ret, err, (unsigned long long)sock);
+#else
+    fprintf(stderr, "[is_socket_alive] poll error: poll_ret=%zd errno=%d sock=%d\n",
+            poll_ret, errno, sock);
+#endif
     return false;
   }
+
+  // poll_ret > 0: socket has events
   char buf[1];
-  return detail::read_socket(sock, &buf[0], sizeof(buf), MSG_PEEK) > 0;
+  auto recv_ret = detail::read_socket(sock, &buf[0], sizeof(buf), MSG_PEEK);
+
+  if (recv_ret > 0) {
+    return true;  // data available, socket alive
+  }
+
+  // Socket considered dead — log details for debugging
+#ifdef _WIN32
+  auto wsa_err = WSAGetLastError();
+  fprintf(stderr, "[is_socket_alive] DEAD: poll_ret=%d revents=0x%x recv_ret=%d WSAError=%d sock=%llu\n",
+          (int)poll_ret, (int)pfd.revents, (int)recv_ret, wsa_err, (unsigned long long)sock);
+#else
+  fprintf(stderr, "[is_socket_alive] DEAD: poll_ret=%zd revents=0x%x recv_ret=%zd errno=%d sock=%d\n",
+          poll_ret, (int)pfd.revents, recv_ret, errno, sock);
+#endif
+  fflush(stderr);
+  return false;
 }
 
 class SocketStream final : public Stream {
