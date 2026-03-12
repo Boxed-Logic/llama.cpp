@@ -33,7 +33,12 @@ llm_build_qwen35::llm_build_qwen35(const llama_model & model, const llm_graph_pa
     ggml_tensor * inp_pos     = cparams.mtp_draft_mode ? nullptr : build_inp_pos();
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
-    for (int il = 0; il < n_layer; ++il) {
+    // MTP head blocks (last nextn_predict_layers) are not part of the main model
+    // forward pass — they're handled separately for MTP prediction. Only iterate
+    // the n_main main model layers here.
+    const int n_main = n_layer - (int)hparams.nextn_predict_layers;
+
+    for (int il = 0; il < n_main; ++il) {
         ggml_tensor * inpSA = inpL;
 
         // MTP draft mode: for full-attention layers, skip both attention and FFN.
@@ -44,7 +49,7 @@ llm_build_qwen35::llm_build_qwen35(const llama_model & model, const llm_graph_pa
         if (skip_full_attn) {
             // Full attention layer bypassed in draft mode - pure pass-through.
             // Handle inp_out_ids at the final layer so output slicing is correct.
-            if (il == n_layer - 1 && inp_out_ids) {
+            if (il == n_main - 1 && inp_out_ids) {
                 inpL = ggml_get_rows(ctx0, inpL, inp_out_ids);
             }
             // inpL is unchanged - this layer is an identity in draft mode
@@ -66,7 +71,7 @@ llm_build_qwen35::llm_build_qwen35(const llama_model & model, const llm_graph_pa
             cur = build_layer_attn(inp_hybrid->get_attn(), cur, inp_pos, sections, il);
         }
 
-        if (il == n_layer - 1 && inp_out_ids) {
+        if (il == n_main - 1 && inp_out_ids) {
             cur   = ggml_get_rows(ctx0, cur, inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }

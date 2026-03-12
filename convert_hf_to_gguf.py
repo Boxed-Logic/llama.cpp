@@ -4849,97 +4849,57 @@ class Qwen3_5TextModel(_LinearAttentionVReorderBase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # MTP (multi-token prediction) layers appended after main layers.
-        # The number of MTP heads is stored in config as "num_nextn_predict_layers"
-        # or can be inferred from the checkpoint tensors (mtp.0.*, mtp.1.*, ...).
-        # We extend block_count so the tensor map covers the extra blocks.
-        nextn = self.hparams.get("num_nextn_predict_layers", 0)
+        # Qwen3.5-0.8B stores the count in text_config.mtp_num_hidden_layers (=1).
+        # We also check num_nextn_predict_layers for forward-compat with future checkpoints.
+        nextn = self.hparams.get("num_nextn_predict_layers",
+                                 self.hparams.get("mtp_num_hidden_layers", 0))
         if nextn:
             self.block_count = self.hparams["num_hidden_layers"] + nextn
             self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
 
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
-        nextn = self.hparams.get("num_nextn_predict_layers", 0)
+        nextn = self.hparams.get("num_nextn_predict_layers",
+                                 self.hparams.get("mtp_num_hidden_layers", 0))
         if nextn:
             self.gguf_writer.add_nextn_predict_layers(nextn)
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         # ── MTP (multi-token prediction) tensors ──────────────────────────────
-        # Qwen3.5 checkpoints include `mtp.{head_idx}.*` tensors that represent
-        # additional "next-next-token" prediction heads trained alongside the
-        # main model.  The HF inference code ignores them; here we convert them
-        # to the standard GGUF NextN layout so llama.cpp can use them for
-        # speculative decoding.
-        #
-        # Expected HF tensor naming (based on the ExaoneMoE / DeepSeek pattern):
-        #   mtp.{head}.enorm.weight          – RMSNorm on token embedding
-        #   mtp.{head}.hnorm.weight          – RMSNorm on hidden state
-        #   mtp.{head}.eh_proj.weight        – linear projection of emb + hidden
-        #   mtp.{head}.shared_head.norm.weight
-        #   mtp.{head}.shared_head.head.weight
-        #   mtp.{head}.layers.{lid}.*        – decoder sub-layers (hybrid)
-        #
-        # NOTE: If the actual names differ, run scripts/inspect_qwen35_mtp.py
-        # against the downloaded checkpoint to get the real names, then update
-        # this method accordingly.
+        # Qwen3.5-0.8B uses a single MTP head with flat naming (no head index):
+        #   mtp.pre_fc_norm_embedding.weight  – RMSNorm on token embedding
+        #   mtp.pre_fc_norm_hidden.weight     – RMSNorm on hidden state
+        #   mtp.fc.weight                     – linear projection: [emb; hidden] → hidden
+        #   mtp.norm.weight                   – output RMSNorm before shared LM head
+        #   mtp.layers.0.{input_layernorm, post_attention_layernorm,
+        #                  self_attn.{q,k,v,o}_proj, self_attn.{q,k}_norm,
+        #                  mlp.{gate,up,down}_proj}.weight   – full-attention decoder layer
         if name.startswith("mtp."):
-            # Parse head index: "mtp.{head_idx}.<rest>"
-            parts = name.split(".", 2)   # ["mtp", head_idx, rest]
-            if len(parts) < 3:
-                logger.warning("Unexpected MTP tensor (skipping): %s", name)
-                return
-
-            # Support both "mtp.{N}.foo" (indexed heads) and "mtp.foo" (shared)
-            try:
-                head_idx = int(parts[1])
-                rest = parts[2]
-            except ValueError:
-                # Shared MTP weight without a head index – broadcast to all heads
-                rest_full = name[len("mtp."):]
-                num_hidden = self.hparams["num_hidden_layers"]
-                nextn = self.hparams.get("num_nextn_predict_layers", 0)
-                remapper = {
-                    "eh_proj":                  "model.layers.{bid}.eh_proj",
-                    "enorm":                    "model.layers.{bid}.enorm",
-                    "hnorm":                    "model.layers.{bid}.hnorm",
-                    "shared_head.norm":         "model.layers.{bid}.shared_head.norm",
-                    "shared_head.head":         "model.layers.{bid}.shared_head.head",
-                }
-                stem = Path(name).stem
-                if stem in remapper:
-                    suffix = Path(name).suffix
-                    for mtp_bid in range(num_hidden, num_hidden + nextn):
-                        mapped = remapper[stem].format(bid=mtp_bid) + suffix
-                        yield from super().modify_tensors(data_torch, mapped, mtp_bid)
-                else:
-                    logger.warning("Unhandled shared MTP tensor (skipping): %s", name)
+            nextn = self.hparams.get("num_nextn_predict_layers",
+                                     self.hparams.get("mtp_num_hidden_layers", 0))
+            if nextn == 0:
+                logger.warning("MTP tensor found but nextn=0, skipping: %s", name)
                 return
 
             num_hidden = self.hparams["num_hidden_layers"]
-            gguf_bid = num_hidden + head_idx  # block index in GGUF file
+            gguf_bid = num_hidden  # single MTP head appended right after main layers
 
-            if "layers." in rest:
-                # Decoder sub-layer: remap "layers.{lid}.X" → main-model layer path
-                # so that parent modify_tensors sees it as a regular layer tensor.
-                # There is typically only one sub-layer per MTP head (lid == 0).
-                remapped = name.replace(f"mtp.{head_idx}.layers.0.", f"model.layers.{gguf_bid}.")
+            if name.startswith("mtp.layers."):
+                # mtp.layers.0.{sub}.* → model.layers.{gguf_bid}.{sub}.*
+                # Feeds into the same parent mapping as a regular full-attention layer.
+                remapped = name.replace("mtp.layers.0.", f"model.layers.{gguf_bid}.")
                 yield from super().modify_tensors(data_torch, remapped, gguf_bid)
             else:
-                # Per-head normalisation / projection weights
-                remapper = {
-                    "eh_proj":              f"model.layers.{gguf_bid}.eh_proj",
-                    "enorm":                f"model.layers.{gguf_bid}.enorm",
-                    "hnorm":                f"model.layers.{gguf_bid}.hnorm",
-                    "shared_head.norm":     f"model.layers.{gguf_bid}.shared_head.norm",
-                    "shared_head.head":     f"model.layers.{gguf_bid}.shared_head.head",
+                flat_map = {
+                    "mtp.pre_fc_norm_embedding.weight": f"model.layers.{gguf_bid}.enorm.weight",
+                    "mtp.pre_fc_norm_hidden.weight":    f"model.layers.{gguf_bid}.hnorm.weight",
+                    "mtp.fc.weight":                    f"model.layers.{gguf_bid}.eh_proj.weight",
+                    "mtp.norm.weight":                  f"model.layers.{gguf_bid}.shared_head.norm.weight",
                 }
-                # rest might be "enorm.weight", "eh_proj.weight", etc.
-                rest_stem = rest.removesuffix(".weight")
-                if rest_stem in remapper:
-                    mapped = remapper[rest_stem] + ".weight"
-                    yield from super().modify_tensors(data_torch, mapped, gguf_bid)
+                if name in flat_map:
+                    yield from super().modify_tensors(data_torch, flat_map[name], gguf_bid)
                 else:
-                    logger.warning("Unhandled MTP tensor (skipping): %s  (rest=%s)", name, rest)
+                    logger.warning("Unhandled MTP tensor (skipping): %s", name)
             return
         # ── Normal (non-MTP) tensors ──────────────────────────────────────────
         yield from super().modify_tensors(data_torch, name, bid)
