@@ -96,10 +96,16 @@ int main(int argc, char ** argv) {
     // ── target context (full model) ─────────────────────────────────────────
     llama_context_params cparams_tgt = llama_context_default_params();
     cparams_tgt.n_ctx            = (uint32_t)n_ctx;
-    cparams_tgt.n_batch          = (uint32_t)(n_draft + 1);
+    // n_batch must cover: (a) initial prompt prefill, (b) verify batch of n_draft+1,
+    // (c) replay batch of at most n_draft+1. Use n_ctx to handle arbitrary prompts.
+    cparams_tgt.n_batch          = (uint32_t)n_ctx;
     cparams_tgt.n_threads        = n_threads;
     cparams_tgt.n_threads_batch  = n_threads;
     cparams_tgt.mtp_draft_mode   = false;
+    // n_seq_max = 2: seq 0 = active target state; seq 1 = pre-verify snapshot.
+    // The verify batch contaminates ctx_tgt's recurrent state with rejected draft tokens;
+    // restoring from the snapshot and replaying only accepted tokens fixes this.
+    cparams_tgt.n_seq_max        = 2;
 
     llama_context * ctx_tgt = llama_init_from_model(model, cparams_tgt);
     if (!ctx_tgt) {
@@ -119,8 +125,10 @@ int main(int argc, char ** argv) {
         cparams_dft.n_threads       = n_threads;
         cparams_dft.n_threads_batch = n_threads;
         cparams_dft.mtp_draft_mode  = true;   // ← key: skip full-attention layers
-        // Disable KV cache for attention layers (they're unused in draft mode)
-        cparams_dft.n_seq_max       = 1;
+        // n_seq_max = 2: slot 0 = active draft state; slot 1 = snapshot taken before
+        // each draft phase and used to restore to the exact accepted-token state.
+        // Without this, rejected draft tokens contaminate the recurrent state.
+        cparams_dft.n_seq_max       = 2;
 
         ctx_dft = llama_init_from_model(model, cparams_dft);
         if (!ctx_dft) {
@@ -174,7 +182,10 @@ int main(int argc, char ** argv) {
         if (!inp_minus_last.empty()) {
             llama_decode(ctx_tgt, llama_batch_get_one(inp_minus_last.data(), (int)inp_minus_last.size()));
             if (use_mtp) {
-                llama_decode(ctx_dft, llama_batch_get_one(inp_minus_last.data(), (int)inp_minus_last.size()));
+                // Draft context has n_batch=1 (single-token), so prefill token-by-token
+                for (llama_token & tok : inp_minus_last) {
+                    llama_decode(ctx_dft, llama_batch_get_one(&tok, 1));
+                }
             }
         }
     }
@@ -194,8 +205,20 @@ int main(int argc, char ** argv) {
 
     llama_batch batch_tgt = llama_batch_init(n_draft + 2, 0, 1);
 
+    llama_memory_t mem_dft = use_mtp ? llama_get_memory(ctx_dft) : nullptr;
+    llama_memory_t mem_tgt = llama_get_memory(ctx_tgt);
+
     while (n_total < n_predict) {
         if (use_mtp) {
+            // ── SNAPSHOT draft context before drafting ────────────────────────
+            // We copy seq 0 → seq 1 so we can restore exactly to this state after
+            // partial acceptance (rejected draft tokens would otherwise contaminate
+            // the Delta Net recurrent state, reducing future acceptance rates).
+            llama_memory_seq_cp(mem_dft, 0, 1, 0, -1);
+            llama_memory_seq_cp(mem_tgt, 0, 1, 0, -1);
+            llama_token id_last_iter = id_last; // saved for both replays below
+            const int old_n_past     = n_past;
+
             // ── DRAFT PHASE ──────────────────────────────────────────────────
             // Generate n_draft candidate tokens using the cheap recurrent-only path.
             std::vector<llama_token> draft;
@@ -207,19 +230,14 @@ int main(int argc, char ** argv) {
                 llama_decode(ctx_dft, b);
             }
 
-            llama_token draft_cur = id_last;
             for (int d = 0; d < n_draft; ++d) {
-                // Sample next draft token
                 llama_token tok = llama_sampler_sample(smpl_dft, ctx_dft, -1);
                 if (llama_vocab_is_eog(vocab, tok)) break;
                 draft.push_back(tok);
 
-                // Advance the draft context by one token
                 llama_batch b = llama_batch_get_one(&tok, 1);
                 if (llama_decode(ctx_dft, b) != 0) break;
-                draft_cur = tok;
             }
-            (void)draft_cur;
 
             // ── VERIFY PHASE ─────────────────────────────────────────────────
             // Submit [id_last, draft[0], draft[1], ...] to the target model in one batch.
@@ -246,7 +264,7 @@ int main(int argc, char ** argv) {
                 }
             }
 
-            // The last accepted token is always a fresh target sample (bonus token).
+            // The last element of accepted is always a fresh target sample (bonus token).
             n_accepted  += (int)accepted.size() - 1;
             n_past      += (int)accepted.size();
             n_total     += (int)accepted.size();
@@ -258,12 +276,36 @@ int main(int argc, char ** argv) {
                 fflush(stdout);
             }
 
-            // Trim KV cache to what was actually accepted
-            llama_memory_seq_rm(llama_get_memory(ctx_tgt), 0, n_past, -1);
+            // ── RESTORE target context ────────────────────────────────────────
+            // The verify batch advanced ctx_tgt's recurrent state to old_n_past+n_draft.
+            // seq_rm cannot roll it back. Restore from snapshot and replay accepted
+            // tokens in one batch so the recurrent state is exactly at n_past-1.
+            llama_memory_seq_rm(mem_tgt, 0, 0, -1);     // clear seq 0 completely
+            llama_memory_seq_cp(mem_tgt, 1, 0, 0, -1);  // restore from snapshot
+            llama_memory_seq_rm(mem_tgt, 1, 0, -1);     // free snapshot slot
 
-            // Rewind draft context to match accepted position.
-            // Simple approach: rewind past any speculative tokens we didn't use.
-            llama_memory_seq_rm(llama_get_memory(ctx_dft), 0, n_past, -1);
+            if (!stop) {
+                common_batch_clear(batch_tgt);
+                common_batch_add(batch_tgt, id_last_iter, old_n_past, {0}, false);
+                for (int i = 0; i < (int)accepted.size() - 1; ++i) {
+                    common_batch_add(batch_tgt, accepted[i], old_n_past + 1 + i, {0}, false);
+                }
+                llama_decode(ctx_tgt, batch_tgt);
+            }
+
+            // ── RESTORE draft context ─────────────────────────────────────────
+            // Reset seq 0 to the snapshot, replay accepted tokens one-by-one so
+            // ctx_dft's recurrent state is at n_past-1 for the next draft phase.
+            llama_memory_seq_rm(mem_dft, 0, 0, -1);     // clear seq 0 completely
+            llama_memory_seq_cp(mem_dft, 1, 0, 0, -1);  // restore from snapshot
+            llama_memory_seq_rm(mem_dft, 1, 0, -1);     // free snapshot slot
+
+            {
+                llama_decode(ctx_dft, llama_batch_get_one(&id_last_iter, 1));
+                for (int i = 0; i < (int)accepted.size() - 1; ++i) {
+                    llama_decode(ctx_dft, llama_batch_get_one(&accepted[i], 1));
+                }
+            }
 
             id_last = accepted.back();
             if (stop || n_total >= n_predict) break;
