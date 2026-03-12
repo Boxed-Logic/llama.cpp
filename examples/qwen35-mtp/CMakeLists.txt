@@ -1,0 +1,5 @@
+set(TARGET llama-qwen35-mtp)
+add_executable(${TARGET} qwen35-mtp.cpp)
+install(TARGETS ${TARGET} RUNTIME)
+target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT})
+target_compile_features(${TARGET} PRIVATE cxx_std_17)

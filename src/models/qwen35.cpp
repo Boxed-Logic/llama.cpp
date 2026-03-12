@@ -18,13 +18,38 @@ llm_build_qwen35::llm_build_qwen35(const llama_model & model, const llm_graph_pa
 
     cb(inpL, "model.input_embed", -1);
 
-    auto * inp = build_inp_mem_hybrid();
+    // In MTP draft mode, use pure recurrent memory (no KV cache for attention layers).
+    // In normal mode, use the full hybrid (attention + recurrent) memory.
+    llm_graph_input_mem_hybrid * inp_hybrid = nullptr;
+    llm_graph_input_rs         * inp_recr   = nullptr;
+    if (cparams.mtp_draft_mode) {
+        // Draft mode: recurrent-only memory context
+        inp_recr = build_rs_inp();
+    } else {
+        inp_hybrid = build_inp_mem_hybrid();
+    }
 
-    ggml_tensor * inp_pos     = build_inp_pos();
+    // inp_pos is only needed for full-attention layers (RoPE); skip in draft mode
+    ggml_tensor * inp_pos     = cparams.mtp_draft_mode ? nullptr : build_inp_pos();
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
         ggml_tensor * inpSA = inpL;
+
+        // MTP draft mode: for full-attention layers, skip both attention and FFN.
+        // Only the recurrent (linear attention) layers are evaluated, making the
+        // draft forward pass much faster. This enables Qwen3.5 self-speculative decoding.
+        const bool skip_full_attn = (!hparams.is_recurrent(il)) && cparams.mtp_draft_mode;
+
+        if (skip_full_attn) {
+            // Full attention layer bypassed in draft mode - pure pass-through.
+            // Handle inp_out_ids at the final layer so output slicing is correct.
+            if (il == n_layer - 1 && inp_out_ids) {
+                inpL = ggml_get_rows(ctx0, inpL, inp_out_ids);
+            }
+            // inpL is unchanged - this layer is an identity in draft mode
+            continue;
+        }
 
         cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
         cb(cur, "attn_norm", il);
@@ -34,10 +59,11 @@ llm_build_qwen35::llm_build_qwen35(const llama_model & model, const llm_graph_pa
         // Determine layer type and build appropriate attention mechanism
         if (hparams.is_recurrent(il)) {
             // Linear attention layer (gated delta net)
-            cur = build_layer_attn_linear(inp->get_recr(), cur, il);
+            auto * recr = cparams.mtp_draft_mode ? inp_recr : inp_hybrid->get_recr();
+            cur = build_layer_attn_linear(recr, cur, il);
         } else {
-            // Full attention layer
-            cur = build_layer_attn(inp->get_attn(), cur, inp_pos, sections, il);
+            // Full attention layer (only reached in non-draft mode)
+            cur = build_layer_attn(inp_hybrid->get_attn(), cur, inp_pos, sections, il);
         }
 
         if (il == n_layer - 1 && inp_out_ids) {

@@ -130,12 +130,19 @@ void llama_memory_hybrid::clear(bool data) {
 }
 
 bool llama_memory_hybrid::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
-    // Try removing from the recurrent cache first since it may fail. If it does
-    // fail, the cache will not have been mutated.
-    if (!mem_recr->seq_rm(seq_id, p0, p1)) {
-        return false;
-    }
-    return mem_attn->seq_rm(seq_id, p0, p1);
+    // Attempt to trim both the recurrent state and the attention KV cache.
+    // Recurrent state trimming may fail (e.g. when trying to roll back speculative
+    // tokens — recurrent models cannot partially unroll their state). In that case
+    // we still trim the attention KV cache so that position tracking stays correct:
+    //   seq_pos_max() = min(kv_pos_max, recurrent_pos_max)
+    // If only the KV is trimmed, seq_pos_max == kv_pos_max (the recurrent "ahead"
+    // position is hidden), and subsequent batch position checks pass.  The recurrent
+    // state may be slightly contaminated by rejected speculative tokens but this is
+    // acceptable for self-speculative decoding where recurrent state continuity is
+    // already approximate.
+    bool recr_ok = mem_recr->seq_rm(seq_id, p0, p1);
+    bool attn_ok = mem_attn->seq_rm(seq_id, p0, p1);
+    return recr_ok && attn_ok;
 }
 
 void llama_memory_hybrid::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {

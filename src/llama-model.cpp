@@ -61,6 +61,7 @@ const char * llm_type_name(llm_type type) {
         case LLM_TYPE_0_3B:          return "0.3B";
         case LLM_TYPE_0_5B:          return "0.5B";
         case LLM_TYPE_0_6B:          return "0.6B";
+        case LLM_TYPE_0_8B:          return "0.8B";
         case LLM_TYPE_1B:            return "1B";
         case LLM_TYPE_1_2B:          return "1.2B";
         case LLM_TYPE_1_3B:          return "1.3B";
@@ -2528,7 +2529,8 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 }
 
                 switch (hparams.n_layer) {
-                    case 24: type = LLM_TYPE_2B; break;
+                    case 16: type = LLM_TYPE_0_8B; break;
+                    case 24: type = LLM_TYPE_2B;   break;
                     default: type = LLM_TYPE_UNKNOWN;
                 }
             } break;
@@ -8236,6 +8238,18 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
         default:
             {
                 if (llm_arch_is_recurrent(arch)) {
+                    res = new llama_memory_recurrent(
+                            *this,
+                            GGML_TYPE_F32,
+                            GGML_TYPE_F32,
+                            cparams.offload_kqv,
+                            std::max((uint32_t) 1, cparams.n_seq_max),
+                            cparams.n_seq_max,
+                            nullptr);
+                } else if (llm_arch_is_hybrid(arch) && cparams.mtp_draft_mode) {
+                    // MTP draft mode for hybrid architectures (e.g. Qwen3.5):
+                    // skip full-attention layers entirely — use only recurrent memory.
+                    // This creates a fast recurrent-only draft path with the same weights.
                     res = new llama_memory_recurrent(
                             *this,
                             GGML_TYPE_F32,

@@ -36,6 +36,7 @@ struct llama_cparams {
     bool op_offload;
     bool kv_unified;
     bool pipeline_parallel;
+    bool mtp_draft_mode; // skip full attention layers for Qwen3.5 self-speculative MTP
 
     enum llama_pooling_type pooling_type;
 

@@ -155,8 +155,9 @@ llama_context::llama_context(
 
     cparams.n_ubatch = std::min(cparams.n_batch, params.n_ubatch == 0 ? params.n_batch : params.n_ubatch);
 
-    cparams.op_offload = params.op_offload;
-    cparams.kv_unified = params.kv_unified;
+    cparams.op_offload     = params.op_offload;
+    cparams.kv_unified     = params.kv_unified;
+    cparams.mtp_draft_mode = params.mtp_draft_mode;
 
     // intialized later
     cparams.pipeline_parallel = false;
@@ -2799,6 +2800,7 @@ llama_context_params llama_context_default_params() {
         /*.op_offload                  =*/ true,
         /*.swa_full                    =*/ true,
         /*.kv_unified                  =*/ false,
+        /*.mtp_draft_mode              =*/ false,
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
     };
