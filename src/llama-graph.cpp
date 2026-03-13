@@ -1291,8 +1291,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     }
 
     // select experts
-    ggml_tensor * selected_experts = ggml_argsort_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
-    cb(selected_experts->src[0], "ffn_moe_argsort", il);
+    // EXPERIMENT: always select first K experts (router still runs but selection is fixed)
+    ggml_tensor * expert_range = ggml_cast(ctx0,
+        ggml_arange(ctx0, 0.0f, (float)n_expert_used, 1.0f),
+        GGML_TYPE_I32); // [n_expert_used]
+    expert_range = ggml_reshape_2d(ctx0, expert_range, n_expert_used, 1);
+    ggml_tensor * selected_experts = ggml_repeat(ctx0, expert_range,
+        ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, n_expert_used, n_tokens)); // [n_expert_used, n_tokens]
     cb(selected_experts, "ffn_moe_topk", il);
 
     if (arch == LLM_ARCH_GROVEMOE && n_expert != hparams.n_expert) {
