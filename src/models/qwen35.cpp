@@ -11,6 +11,118 @@ llm_build_qwen35::llm_build_qwen35(const llama_model & model, const llm_graph_pa
     int sections[4];
     std::copy(std::begin(hparams.rope_sections), std::begin(hparams.rope_sections) + 4, sections);
 
+    // MTP head blocks (last nextn_predict_layers) are not part of the main model
+    // forward pass — they're handled separately for MTP prediction. Only iterate
+    // the n_main main model layers here.
+    const int n_main = n_layer - (int)hparams.nextn_predict_layers;
+
+    // ─── MTP HEAD MODE ───────────────────────────────────────────────────────
+    // Skip main layers 0..n_main-1; run only the MTP head layer (blk.n_main).
+    //
+    // Inputs (from batch):
+    //   batch.token = prev token ID  → used for tok_embd lookup
+    //   batch.embd  = h_last [n_embd] → pre-output-norm hidden state from ctx_tgt
+    //
+    // Graph: enorm(tok_emb) + hnorm(h_last) → eh_proj → attn+FFN (il=n_main)
+    //        → t_embd (pre-norm, for chaining) → shared_head_norm → lm_head → logits
+    if (cparams.mtp_head_mode) {
+        auto * inp_hybrid     = build_inp_mem_hybrid();
+        ggml_tensor * inp_pos     = build_inp_pos();
+        ggml_tensor * inp_out_ids = build_inp_out_ids();
+
+        // Build input object for BOTH tokens (emb lookup) and embd (h_last).
+        // llm_graph_input_embd::set_input() fills both when present in the batch.
+        auto inp_embd_obj = std::make_unique<llm_graph_input_embd>(n_embd);
+
+        inp_embd_obj->tokens = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ubatch.n_tokens);
+        ggml_set_input(inp_embd_obj->tokens);
+        cb(inp_embd_obj->tokens, "inp_tokens", -1);
+        res->t_inp_tokens = inp_embd_obj->tokens;
+
+        inp_embd_obj->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd, ubatch.n_tokens);
+        ggml_set_input(inp_embd_obj->embd);
+        cb(inp_embd_obj->embd, "inp_embd", -1);
+
+        // Token embedding lookup (batch.token)
+        ggml_tensor * tok_emb = ggml_get_rows(ctx0, model.tok_embd, inp_embd_obj->tokens);
+        // h_last: pre-output-norm hidden state from ctx_tgt (batch.embd)
+        ggml_tensor * h_last = inp_embd_obj->embd;
+
+        // Register with framework so set_inputs() fills both tensors from the batch
+        res->add_input(std::move(inp_embd_obj));
+
+        // nextn projection: enorm(emb) concat hnorm(h) → eh_proj → [n_embd, n_tokens]
+        const int il = n_main;
+        const auto & layer = model.layers[il];
+
+        ggml_tensor * normed_emb = build_norm(tok_emb, layer.nextn.enorm, nullptr, LLM_NORM_RMS, il);
+        cb(normed_emb, "mtp_normed_emb", il);
+
+        ggml_tensor * normed_h = build_norm(h_last, layer.nextn.hnorm, nullptr, LLM_NORM_RMS, il);
+        cb(normed_h, "mtp_normed_h", il);
+
+        // Concatenate along dim 0: [2*n_embd, n_tokens]
+        ggml_tensor * combined = ggml_concat(ctx0, normed_emb, normed_h, 0);
+        cb(combined, "mtp_combined", il);
+
+        // eh_proj shape: {2*n_embd, n_embd} → ggml_mul_mat maps [2*n_embd, n_tokens] → [n_embd, n_tokens]
+        ggml_tensor * projected = ggml_mul_mat(ctx0, layer.nextn.eh_proj, combined);
+        cb(projected, "mtp_projected", il);
+
+        ggml_build_forward_expand(gf, projected);
+
+        // Run MTP attention layer + post-attn-norm + FFN
+        ggml_tensor * inpL  = projected;
+        ggml_tensor * cur;
+        ggml_tensor * inpSA = inpL;
+
+        cur = build_norm(inpL, layer.attn_norm, nullptr, LLM_NORM_RMS, il);
+        cb(cur, "attn_norm", il);
+
+        ggml_build_forward_expand(gf, cur);
+
+        cur = build_layer_attn(inp_hybrid->get_attn(), cur, inp_pos, sections, il);
+
+        if (inp_out_ids) {
+            cur   = ggml_get_rows(ctx0, cur, inp_out_ids);
+            inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
+        }
+
+        cur = ggml_add(ctx0, cur, inpSA);
+        cb(cur, "attn_residual", il);
+
+        ggml_tensor * ffn_residual = cur;
+
+        cur = build_norm(cur, layer.attn_post_norm, nullptr, LLM_NORM_RMS, il);
+        cb(cur, "attn_post_norm", il);
+
+        cur = build_layer_ffn(cur, il);
+        cb(cur, "ffn_out", il);
+
+        cur = ggml_add(ctx0, cur, ffn_residual);
+        cb(cur, "post_ffn", il);
+
+        // Capture pre-output-norm h_mtp for chaining (next draft step's h_last input)
+        res->t_embd = cur;
+
+        // Output norm: use MTP head's shared_head_norm if present, else fall back
+        ggml_tensor * out_norm_w = (layer.nextn.shared_head_norm != nullptr)
+                                        ? layer.nextn.shared_head_norm
+                                        : model.output_norm;
+        cur = build_norm(cur, out_norm_w, nullptr, LLM_NORM_RMS, -1);
+        cb(cur, "result_norm", -1);
+
+        // Shared LM head (same weights as main model)
+        cur = build_lora_mm(model.output, cur);
+        cb(cur, "result_output", -1);
+        res->t_logits = cur;
+
+        ggml_build_forward_expand(gf, cur);
+        return; // skip main model loop
+    }
+
+    // ─── NORMAL / DRAFT PATH ─────────────────────────────────────────────────
+
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
@@ -32,11 +144,6 @@ llm_build_qwen35::llm_build_qwen35(const llama_model & model, const llm_graph_pa
     // inp_pos is only needed for full-attention layers (RoPE); skip in draft mode
     ggml_tensor * inp_pos     = cparams.mtp_draft_mode ? nullptr : build_inp_pos();
     ggml_tensor * inp_out_ids = build_inp_out_ids();
-
-    // MTP head blocks (last nextn_predict_layers) are not part of the main model
-    // forward pass — they're handled separately for MTP prediction. Only iterate
-    // the n_main main model layers here.
-    const int n_main = n_layer - (int)hparams.nextn_predict_layers;
 
     for (int il = 0; il < n_main; ++il) {
         ggml_tensor * inpSA = inpL;
@@ -100,11 +207,15 @@ llm_build_qwen35::llm_build_qwen35(const llama_model & model, const llm_graph_pa
     }
     cur = inpL;
 
+    // Capture pre-output-norm hidden state for MTP chaining.
+    // llama_get_embeddings_ith() on ctx_tgt returns this value, which is then
+    // passed as h_last to the MTP head via batch.embd.
+    res->t_embd = cur;
+
     // Final norm
     cur = build_norm(cur, model.output_norm, nullptr, LLM_NORM_RMS, -1);
 
     cb(cur, "result_norm", -1);
-    res->t_embd = cur;
 
     // LM head
     cur = build_lora_mm(model.output, cur);

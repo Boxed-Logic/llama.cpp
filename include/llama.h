@@ -371,6 +371,8 @@ extern "C" {
                           // try to disable when n_seq_max > 1 for improved performance when the sequences do not share a large prefix
                           // ref: https://github.com/ggml-org/llama.cpp/pull/14363
         bool mtp_draft_mode; // [Qwen3.5 MTP] skip full attention layers, run only recurrent layers for fast self-speculative drafting
+        bool mtp_head_mode;  // [Qwen3.5 MTP] run only the MTP head layer (blk.n_main); input projected vector + hidden state via batch; requires embeddings=true for chaining
+        bool no_output_all;  // [Qwen3.5 MTP] when embeddings=true, do NOT force output_all: only tokens with logits[i]=1 go through output_norm+lm_head; reduces restore-replay overhead
 
         // [EXPERIMENTAL]
         // backend sampler chain configuration (make sure the caller keeps the sampler chains alive)

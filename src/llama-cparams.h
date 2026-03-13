@@ -37,6 +37,8 @@ struct llama_cparams {
     bool kv_unified;
     bool pipeline_parallel;
     bool mtp_draft_mode; // skip full attention layers for Qwen3.5 self-speculative MTP
+    bool mtp_head_mode;  // run only the Qwen3.5 MTP head layer (blk.n_main)
+    bool no_output_all;  // when embeddings=true, only tokens with output=1 run output_norm+lm_head
 
     enum llama_pooling_type pooling_type;
 

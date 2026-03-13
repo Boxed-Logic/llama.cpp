@@ -534,6 +534,10 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
     if (inp_rs->s_copy) {
+        if (!inp_rs->s_copy->buffer) {
+            // s_copy not wired into the graph (e.g. mtp_head_mode skips all recurrent layers)
+            return;
+        }
         GGML_ASSERT(ggml_backend_buffer_is_host(inp_rs->s_copy->buffer));
         int32_t * data = (int32_t *) inp_rs->s_copy->data;
 

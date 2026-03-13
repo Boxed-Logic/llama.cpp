@@ -4502,7 +4502,8 @@ class Qwen3NextModel(Qwen2MoeModel):
             name = name.rpartition(".dt_bias")[0] + ".dt_proj.bias"
         elif "conv1d" in name:
             data_torch = data_torch.squeeze()
-        elif name.endswith("norm.weight") and not name.endswith("linear_attn.norm.weight"):
+        elif (name.endswith("norm.weight") or name in ("mtp.pre_fc_norm_embedding.weight", "mtp.pre_fc_norm_hidden.weight")) \
+                and not name.endswith("linear_attn.norm.weight"):
             data_torch = data_torch + 1
 
         if "in_proj_qkvz.weight" in name:
@@ -4865,6 +4866,14 @@ class Qwen3_5TextModel(_LinearAttentionVReorderBase):
             self.gguf_writer.add_nextn_predict_layers(nextn)
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        # Skip vision tensors for VL variants (e.g. Qwen3.5-4B uses model.visual.*)
+        if name.startswith("model.visual."):
+            return
+
+        # Strip language_model. prefix for VL variants (e.g. Qwen3.5-4B uses model.language_model.*)
+        if name.startswith("model.language_model."):
+            name = name.replace("model.language_model.", "model.", 1)
+
         # ── MTP (multi-token prediction) tensors ──────────────────────────────
         # Qwen3.5-0.8B uses a single MTP head with flat naming (no head index):
         #   mtp.pre_fc_norm_embedding.weight  – RMSNorm on token embedding

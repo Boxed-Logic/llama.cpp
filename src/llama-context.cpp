@@ -158,6 +158,8 @@ llama_context::llama_context(
     cparams.op_offload     = params.op_offload;
     cparams.kv_unified     = params.kv_unified;
     cparams.mtp_draft_mode = params.mtp_draft_mode;
+    cparams.mtp_head_mode  = params.mtp_head_mode;
+    cparams.no_output_all  = params.no_output_all;
 
     // intialized later
     cparams.pipeline_parallel = false;
@@ -1420,7 +1422,8 @@ static bool needs_raw_logits(const llama_ubatch & ubatch, const std::map<llama_s
 }
 
 int llama_context::decode(const llama_batch & batch_inp) {
-    GGML_ASSERT((!batch_inp.token && batch_inp.embd) || (batch_inp.token && !batch_inp.embd)); // NOLINT
+    // mtp_head_mode needs both token (tok_embd lookup) and embd (h_last) simultaneously
+    GGML_ASSERT((!batch_inp.token && batch_inp.embd) || (batch_inp.token && !batch_inp.embd) || cparams.mtp_head_mode); // NOLINT
 
     if (!memory) {
         LLAMA_LOG_DEBUG("%s: cannot decode batches with this context (calling encode() instead)\n", __func__);
@@ -1438,8 +1441,9 @@ int llama_context::decode(const llama_batch & batch_inp) {
     const int64_t n_vocab = vocab.n_tokens();
     const int64_t n_embd  = hparams.n_embd_inp();
 
-    // when computing embeddings, all tokens are output
-    const bool output_all   = cparams.embeddings;
+    // when computing embeddings, all tokens are output — unless no_output_all is set,
+    // in which case only tokens with logits[i]=1 run output_norm+lm_head (cheaper replay).
+    const bool output_all   = cparams.embeddings && !cparams.no_output_all;
     const bool has_samplers = !sampling.samplers.empty();
 
     const uint32_t n_seq_max = cparams.kv_unified ? LLAMA_MAX_SEQ : cparams.n_seq_max;
@@ -2801,6 +2805,8 @@ llama_context_params llama_context_default_params() {
         /*.swa_full                    =*/ true,
         /*.kv_unified                  =*/ false,
         /*.mtp_draft_mode              =*/ false,
+        /*.mtp_head_mode               =*/ false,
+        /*.no_output_all               =*/ false,
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
     };
